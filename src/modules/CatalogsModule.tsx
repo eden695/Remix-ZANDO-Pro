@@ -36,6 +36,7 @@ import {
 } from '../services/catalogueGenerator';
 import {
   buildCatalogSlug,
+  isStaticHostWithoutBackend,
   publishCatalogOnline,
   unpublishCatalogOnline,
 } from '../services/onlineCatalogService';
@@ -411,6 +412,9 @@ export const CatalogsModule: React.FC = () => {
   const previewWebUrl = useMemo(() => {
     if (!previewCatalog) return '';
     if (previewCatalog.onlineUrl) return previewCatalog.onlineUrl;
+    if (isStaticHostWithoutBackend()) {
+      return `catalogue-autonome://${getSafeSlug(previewCatalog.title)}.html`;
+    }
     const slug = buildCatalogSlug(previewCatalog);
     const origin = typeof window !== 'undefined' ? window.location.origin : 'https://zando.pro';
     return `${origin}/c/${slug}`;
@@ -1007,7 +1011,8 @@ export const CatalogsModule: React.FC = () => {
                     <span>Ouvrir sur le web</span>
                   </a>
                 ) : (
-                  isOnline && (
+                  isOnline &&
+                  !isStaticHostWithoutBackend() && (
                     <button
                       type="button"
                       disabled={publishingId === previewCatalog.id}
