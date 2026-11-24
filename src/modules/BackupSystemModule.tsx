@@ -18,6 +18,7 @@ import {
   KeyRound,
   Lock,
   LogOut,
+  Moon,
   Play,
   Plus,
   RefreshCw,
@@ -27,6 +28,7 @@ import {
   ShieldCheck,
   Sparkles,
   Store,
+  Sun,
   Trash2,
   Upload,
   Users,
@@ -65,7 +67,7 @@ import {
   getLockMethodLabel,
 } from '../services/securityService';
 import {loadSampleCommerceData} from '../services/seedService';
-import {LockMethod, StoreSlot, ZandoBackupPayload} from '../types/commerce';
+import {LockMethod, StoreSlot, ThemeMode, ZandoBackupPayload} from '../types/commerce';
 import {formatBytes, formatDateTime} from '../utils/format';
 
 interface BackupSystemModuleProps {
@@ -77,6 +79,7 @@ export const BackupSystemModule: React.FC<BackupSystemModuleProps> = ({onOpenGui
     schemaMeta,
     appMode,
     zandoDeviceId,
+    storeProfile,
     storeSlots,
     activeStoreId,
     securitySettings,
@@ -89,6 +92,7 @@ export const BackupSystemModule: React.FC<BackupSystemModuleProps> = ({onOpenGui
     switchStore,
     createNewStore,
     removeStoreSlot,
+    saveStoreProfile,
     lockAppNow,
     enableSecurityLock,
     disablePinLock,
@@ -543,7 +547,7 @@ export const BackupSystemModule: React.FC<BackupSystemModuleProps> = ({onOpenGui
         </div>
       </section>
 
-      {/* 2. Multi-boutiques, Vente, Achat & Collaboration */}
+      {/* 2. Multi-boutiques, Basculer, Acheter / Rejoindre & Collaboration */}
       <section className="rounded-2xl border border-slate-200 dark:border-slate-800 bg-white dark:bg-slate-900 p-5 space-y-4">
         <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-3">
           <div>
@@ -554,7 +558,7 @@ export const BackupSystemModule: React.FC<BackupSystemModuleProps> = ({onOpenGui
               </span>
             </h2>
             <p className="mt-1 text-xs sm:text-sm text-slate-600 dark:text-slate-400">
-              Gérez jusqu’à {MAX_STORES} boutiques locales, cédez-en une définitivement ou accordez un accès en collaboration.
+              Basculez entre vos {MAX_STORES} boutiques locales, achetez ou rejoignez une boutique, ou accordez un accès en collaboration.
             </p>
           </div>
           <div className="flex flex-wrap gap-2 shrink-0">
@@ -681,6 +685,54 @@ export const BackupSystemModule: React.FC<BackupSystemModuleProps> = ({onOpenGui
               </div>
             );
           })}
+        </div>
+      </section>
+
+      {/* 2b. Apparence (Thème Clair / Sombre) */}
+      <section className="rounded-2xl border border-slate-200 dark:border-slate-800 bg-white dark:bg-slate-900 p-5 space-y-4">
+        <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-3">
+          <div>
+            <h2 className="text-base font-bold text-slate-900 dark:text-white flex items-center gap-2">
+              {storeProfile.themeMode === 'dark' ? (
+                <Moon className="w-4 h-4 text-emerald-600" />
+              ) : (
+                <Sun className="w-4 h-4 text-emerald-600" />
+              )}
+              <span>Apparence & Thème d’affichage</span>
+            </h2>
+            <p className="mt-1 text-xs sm:text-sm text-slate-600 dark:text-slate-400">
+              Choisissez le thème clair ou sombre de ZANDO Pro sur cet appareil.
+            </p>
+          </div>
+
+          <div className="flex gap-1.5 p-1 rounded-xl bg-slate-100 dark:bg-slate-800 w-full sm:w-64 shrink-0">
+            {(['light', 'dark'] as ThemeMode[]).map((mode) => {
+              const active = storeProfile.themeMode === mode;
+              return (
+                <button
+                  key={mode}
+                  type="button"
+                  onClick={async () => {
+                    if (storeProfile.themeMode === mode) return;
+                    await saveStoreProfile({...storeProfile, themeMode: mode});
+                    notify('Paramètres sauvegardés.', 'success');
+                  }}
+                  className={`flex-1 inline-flex items-center justify-center gap-1.5 min-h-[40px] rounded-lg text-xs font-semibold cursor-pointer transition-colors ${
+                    active
+                      ? 'bg-white dark:bg-slate-900 text-slate-900 dark:text-white shadow-sm'
+                      : 'text-slate-600 dark:text-slate-400 hover:text-slate-900 dark:hover:text-white'
+                  }`}
+                >
+                  {mode === 'light' ? (
+                    <Sun className="w-4 h-4 text-amber-500" />
+                  ) : (
+                    <Moon className="w-4 h-4 text-sky-400" />
+                  )}
+                  <span>{mode === 'light' ? 'Clair' : 'Sombre'}</span>
+                </button>
+              );
+            })}
+          </div>
         </div>
       </section>
 
@@ -1197,15 +1249,13 @@ export const BackupSystemModule: React.FC<BackupSystemModuleProps> = ({onOpenGui
           </div>
 
           <div className="p-3.5 rounded-xl bg-slate-50 dark:bg-slate-800/70">
-            <div className="text-xs text-slate-500 dark:text-slate-400">Cache PWA hors ligne</div>
+            <div className="text-xs text-slate-500 dark:text-slate-400">Mode hors ligne local</div>
             <div className="mt-1 font-bold text-slate-900 dark:text-white flex items-center gap-1.5">
-              {swStatus === 'active' && <CheckCircle2 className="w-4 h-4 text-emerald-600" />}
+              <CheckCircle2 className="w-4 h-4 text-emerald-600" />
               <span>
                 {swStatus === 'active'
                   ? 'Actif et prêt hors ligne'
-                  : swStatus === 'unsupported'
-                    ? 'Non supporté par ce WebView'
-                    : 'Prêt localement'}
+                  : 'Pack local prêt hors ligne'}
               </span>
             </div>
           </div>

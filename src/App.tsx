@@ -6,50 +6,38 @@
 import React, {useCallback, useEffect, useMemo, useState} from 'react';
 import {AnimatePresence, motion} from 'motion/react';
 import {
-  ArrowLeftRight,
   Bell,
   BookOpen,
+  ChevronRight,
   ClipboardList,
   Compass,
   CreditCard,
-  Eye,
-  EyeOff,
-  Info,
   LayoutDashboard,
   Lock,
   LogOut,
   Menu,
   MessageSquareText,
-  Moon,
   Package,
   Percent,
   Plus,
   RotateCcw,
   Settings,
   Share2,
-  ShieldCheck,
   ShoppingCart,
   Store,
-  Sun,
   TrendingUp,
   Users,
   WifiOff,
   X,
 } from 'lucide-react';
-import {AboutPrivacyModal} from './components/AboutPrivacyModal';
 import {AppLockOverlay} from './components/AppLockOverlay';
 import {DemoOnboardingOverlay} from './components/DemoOnboardingOverlay';
 import {NotificationCenterModal} from './components/NotificationCenterModal';
-import {PWAInstallButton} from './components/PWAInstallButton';
 import {SheetModal} from './components/SheetModal';
-import {
-  StoreTransferModal,
-  StoreTransferModalState,
-} from './components/StoreTransferModal';
 import {ToastBanner} from './components/ToastBanner';
 import {ZandoLogo} from './components/ZandoLogo';
 import {StoreProvider, useStore} from './context/StoreContext';
-import {getActiveStoreSlot, MAX_STORES} from './db/indexedDb';
+import {getActiveStoreSlot} from './db/indexedDb';
 import {useOnlineStatus} from './hooks/useOnlineStatus';
 import {AssistantModule} from './modules/AssistantModule';
 import {BackupSystemModule} from './modules/BackupSystemModule';
@@ -66,25 +54,123 @@ import {SocialShareModule} from './modules/SocialShareModule';
 import {StoreIdentityModule} from './modules/StoreIdentityModule';
 import {StorePermissions} from './types/commerce';
 
-const NAV_ITEMS: Array<{
+interface NavItemConfig {
   id: ModuleRoute;
   label: string;
+  subtitle: string;
+  group: 'operations' | 'growth' | 'system';
   icon: React.ComponentType<{className?: string}>;
   requiredPerm?: keyof StorePermissions;
-}> = [
-  {id: 'dashboard', label: 'Tableau de bord', icon: LayoutDashboard},
-  {id: 'products', label: 'Produits & Stock', icon: Package, requiredPerm: 'canManageProducts'},
-  {id: 'sales', label: 'Ventes & Caisse', icon: ShoppingCart, requiredPerm: 'canRecordSales'},
-  {id: 'finances', label: 'Bénéfices & Dépenses', icon: TrendingUp, requiredPerm: 'canViewFinances'},
-  {id: 'credits', label: 'Crédits Clients', icon: CreditCard, requiredPerm: 'canManageCustomersCredits'},
-  {id: 'assistant', label: 'Assistant Local', icon: MessageSquareText},
-  {id: 'orders', label: 'Commandes', icon: ClipboardList, requiredPerm: 'canManageOrders'},
-  {id: 'customers', label: 'Clients', icon: Users, requiredPerm: 'canManageCustomersCredits'},
-  {id: 'promotions', label: 'Promotions', icon: Percent, requiredPerm: 'canManageProducts'},
-  {id: 'catalogs', label: 'Catalogues HTML / PDF', icon: BookOpen, requiredPerm: 'canManageCatalogs'},
-  {id: 'social', label: 'Publication Sociale', icon: Share2, requiredPerm: 'canManageCatalogs'},
-  {id: 'store', label: 'Identité Boutique', icon: Store, requiredPerm: 'canManageSettings'},
-  {id: 'backup', label: 'Paramètres & Sauvegarde', icon: Settings},
+}
+
+const NAV_ITEMS: NavItemConfig[] = [
+  {
+    id: 'dashboard',
+    label: 'Tableau de bord',
+    subtitle: 'Vue globale & indicateurs clés',
+    group: 'operations',
+    icon: LayoutDashboard,
+  },
+  {
+    id: 'products',
+    label: 'Produits & Stock',
+    subtitle: 'Articles, prix, photos & seuils',
+    group: 'operations',
+    icon: Package,
+    requiredPerm: 'canManageProducts',
+  },
+  {
+    id: 'sales',
+    label: 'Ventes & Caisse',
+    subtitle: 'Encaissements & tickets PDF',
+    group: 'operations',
+    icon: ShoppingCart,
+    requiredPerm: 'canRecordSales',
+  },
+  {
+    id: 'orders',
+    label: 'Commandes',
+    subtitle: 'Suivi clients & livraisons',
+    group: 'operations',
+    icon: ClipboardList,
+    requiredPerm: 'canManageOrders',
+  },
+  {
+    id: 'finances',
+    label: 'Bénéfices & Dépenses',
+    subtitle: 'Marges, charges & trésorerie',
+    group: 'operations',
+    icon: TrendingUp,
+    requiredPerm: 'canViewFinances',
+  },
+  {
+    id: 'credits',
+    label: 'Crédits Clients',
+    subtitle: 'Dettes, avances & échéances',
+    group: 'growth',
+    icon: CreditCard,
+    requiredPerm: 'canManageCustomersCredits',
+  },
+  {
+    id: 'customers',
+    label: 'Clients',
+    subtitle: 'Répertoire & historique d’achats',
+    group: 'growth',
+    icon: Users,
+    requiredPerm: 'canManageCustomersCredits',
+  },
+  {
+    id: 'promotions',
+    label: 'Promotions',
+    subtitle: 'Remises & campagnes actives',
+    group: 'growth',
+    icon: Percent,
+    requiredPerm: 'canManageProducts',
+  },
+  {
+    id: 'catalogs',
+    label: 'Catalogues HTML / PDF',
+    subtitle: 'Vitrines autonomes partageables',
+    group: 'growth',
+    icon: BookOpen,
+    requiredPerm: 'canManageCatalogs',
+  },
+  {
+    id: 'social',
+    label: 'Publication Sociale',
+    subtitle: 'WhatsApp, Facebook, Instagram',
+    group: 'growth',
+    icon: Share2,
+    requiredPerm: 'canManageCatalogs',
+  },
+  {
+    id: 'assistant',
+    label: 'Assistant Local',
+    subtitle: 'Analyses & meilleures heures',
+    group: 'growth',
+    icon: MessageSquareText,
+  },
+  {
+    id: 'store',
+    label: 'Identité Boutique',
+    subtitle: 'Logo, bannière, couleurs & coordonnées',
+    group: 'system',
+    icon: Store,
+    requiredPerm: 'canManageSettings',
+  },
+  {
+    id: 'backup',
+    label: 'Paramètres & Sauvegarde',
+    subtitle: 'Boutiques, thème, discret, sécurité & à propos',
+    group: 'system',
+    icon: Settings,
+  },
+];
+
+const DRAWER_GROUPS: Array<{key: NavItemConfig['group']; title: string}> = [
+  {key: 'operations', title: 'Activité & Caisse'},
+  {key: 'growth', title: 'Clients, Catalogues & Assistant'},
+  {key: 'system', title: 'Configuration & Paramètres'},
 ];
 
 const ZandoShell: React.FC = () => {
@@ -92,21 +178,14 @@ const ZandoShell: React.FC = () => {
     loading,
     error,
     appMode,
-    zandoDeviceId,
     storeProfile,
-    storeSlots,
-    activeStoreId,
     activeStoreSlot,
     activePermissions,
     securitySettings,
     unreadNotificationsCount,
-    saveStoreProfile,
     reloadAll,
     resetDemoMode,
     startRealStore,
-    switchStore,
-    createNewStore,
-    updateSecuritySettings,
     lockAppNow,
     notify,
   } = useStore();
@@ -115,14 +194,8 @@ const ZandoShell: React.FC = () => {
   const [route, setRoute] = useState<ModuleRoute>('dashboard');
   const [moreOpen, setMoreOpen] = useState(false);
   const [notificationsOpen, setNotificationsOpen] = useState(false);
-  const [aboutModalTab, setAboutModalTab] = useState<'about' | 'privacy' | null>(null);
-  const [transferModal, setTransferModal] = useState<StoreTransferModalState>(null);
   const [guideOpen, setGuideOpen] = useState(false);
   const [leaveDemoConfirmOpen, setLeaveDemoConfirmOpen] = useState(false);
-  const [newStoreModalOpen, setNewStoreModalOpen] = useState(false);
-  const [newStoreName, setNewStoreName] = useState('');
-  const [newStoreCurrency, setNewStoreCurrency] = useState('FCFA');
-  const [creatingStore, setCreatingStore] = useState(false);
   const [quickSaleTrigger, setQuickSaleTrigger] = useState(0);
   const [quickProductTrigger, setQuickProductTrigger] = useState(0);
 
@@ -171,11 +244,6 @@ const ZandoShell: React.FC = () => {
   const consumeQuickSaleTrigger = useCallback(() => setQuickSaleTrigger(0), []);
   const consumeQuickProductTrigger = useCallback(() => setQuickProductTrigger(0), []);
 
-  const toggleTheme = () => {
-    const nextTheme = storeProfile.themeMode === 'dark' ? 'light' : 'dark';
-    saveStoreProfile({...storeProfile, themeMode: nextTheme});
-  };
-
   if (loading) {
     return (
       <div className="min-h-screen flex flex-col items-center justify-center bg-slate-50 dark:bg-slate-950 p-6 gap-4">
@@ -221,6 +289,8 @@ const ZandoShell: React.FC = () => {
   ].includes(route);
 
   const isCollabStore = appMode !== 'demo' && activeStoreSlot?.role === 'collaborator';
+  const currentStoreTitle =
+    appMode === 'demo' ? 'Mode Démonstration' : activeStoreSlot?.name || storeProfile.name;
 
   return (
     <div className="min-h-screen bg-slate-50 dark:bg-slate-950 text-slate-900 dark:text-slate-100 flex">
@@ -252,109 +322,28 @@ const ZandoShell: React.FC = () => {
           })}
         </nav>
 
-        {/* Multi-Store Compact Bar in Sidebar */}
-        <div className="px-3 py-2.5 border-t border-slate-200 dark:border-slate-800 space-y-1.5 shrink-0">
-          <div className="flex items-center justify-between px-1 text-[11px] font-semibold text-slate-500 dark:text-slate-400">
-            <span>
-              Boutiques ({storeSlots.length}/{MAX_STORES})
-            </span>
-            {storeSlots.length < MAX_STORES && (
-              <button
-                type="button"
-                onClick={() => setNewStoreModalOpen(true)}
-                className="text-emerald-700 dark:text-emerald-400 hover:underline cursor-pointer"
-              >
-                + Ouvrir
-              </button>
-            )}
+        {/* Minimal Active Store Status & Session Lock Footer */}
+        <div className="p-3.5 border-t border-slate-200 dark:border-slate-800 space-y-2.5 shrink-0">
+          <div className="px-1">
+            <div className="text-[11px] font-medium text-slate-400 dark:text-slate-500">
+              Boutique ouverte
+            </div>
+            <div className="text-xs font-bold text-slate-800 dark:text-slate-200 truncate">
+              {currentStoreTitle} · {storeProfile.currency}
+            </div>
           </div>
-          <div className="space-y-1">
-            {storeSlots.map((slot) => {
-              const current = appMode === 'real' && slot.id === activeStoreId;
-              return (
-                <button
-                  key={slot.id}
-                  type="button"
-                  onClick={() => switchStore(slot.id)}
-                  className={`w-full flex items-center justify-between gap-2 px-2.5 py-1.5 rounded-lg text-xs font-semibold transition-colors cursor-pointer ${
-                    current
-                      ? 'bg-emerald-50 dark:bg-emerald-950/50 text-emerald-800 dark:text-emerald-300 border border-emerald-200 dark:border-emerald-800'
-                      : 'text-slate-600 dark:text-slate-300 hover:bg-slate-100 dark:hover:bg-slate-800'
-                  }`}
-                >
-                  <span className="truncate">
-                    {slot.name}
-                    {slot.role === 'collaborator' ? ' (Collab)' : ''}
-                  </span>
-                  <span className="text-[10px] opacity-75 shrink-0">{slot.currency}</span>
-                </button>
-              );
-            })}
-          </div>
-          <button
-            type="button"
-            onClick={() => setTransferModal({mode: 'buy'})}
-            className="w-full inline-flex items-center justify-center gap-1.5 min-h-[34px] px-2.5 rounded-lg border border-slate-200 dark:border-slate-700 text-[11px] font-semibold text-slate-700 dark:text-slate-200 hover:bg-slate-50 dark:hover:bg-slate-800 cursor-pointer"
-          >
-            <ArrowLeftRight className="w-3.5 h-3.5 text-emerald-600" />
-            <span>Acheter / Rejoindre boutique</span>
-          </button>
-        </div>
 
-        <div className="p-3 border-t border-slate-200 dark:border-slate-800 space-y-2 shrink-0">
-          <PWAInstallButton />
-          <div className="flex gap-1.5">
+          {securitySettings.pinEnabled && (
             <button
               type="button"
-              onClick={() =>
-                updateSecuritySettings({
-                  privacyModeEnabled: !securitySettings.privacyModeEnabled,
-                })
-              }
-              className="flex-1 flex items-center justify-center gap-1.5 min-h-[38px] px-2 rounded-xl border border-slate-200 dark:border-slate-700 text-xs font-semibold text-slate-700 dark:text-slate-200 hover:bg-slate-50 dark:hover:bg-slate-800 cursor-pointer"
-              title="Masquer / afficher les montants financiers"
+              onClick={lockAppNow}
+              className="w-full flex items-center justify-center gap-1.5 min-h-[40px] px-3 rounded-xl border border-slate-200 dark:border-slate-700 text-xs font-semibold text-slate-700 dark:text-slate-200 hover:bg-slate-50 dark:hover:bg-slate-800 cursor-pointer"
+              title="Verrouiller la session maintenant"
             >
-              {securitySettings.privacyModeEnabled ? (
-                <Eye className="w-3.5 h-3.5 text-emerald-600" />
-              ) : (
-                <EyeOff className="w-3.5 h-3.5" />
-              )}
-              <span>{securitySettings.privacyModeEnabled ? 'Visible' : 'Discret'}</span>
+              <Lock className="w-3.5 h-3.5 text-amber-600" />
+              <span>Verrouiller l’app</span>
             </button>
-            {securitySettings.pinEnabled && (
-              <button
-                type="button"
-                onClick={lockAppNow}
-                className="flex-1 flex items-center justify-center gap-1.5 min-h-[38px] px-2 rounded-xl border border-slate-200 dark:border-slate-700 text-xs font-semibold text-slate-700 dark:text-slate-200 hover:bg-slate-50 dark:hover:bg-slate-800 cursor-pointer"
-                title="Verrouiller la session maintenant"
-              >
-                <Lock className="w-3.5 h-3.5 text-amber-600" />
-                <span>Verrouiller</span>
-              </button>
-            )}
-          </div>
-          <div className="flex gap-1.5">
-            <button
-              type="button"
-              onClick={toggleTheme}
-              className="flex-1 flex items-center justify-center gap-1.5 min-h-[38px] px-2.5 rounded-xl border border-slate-200 dark:border-slate-700 text-xs font-semibold text-slate-700 dark:text-slate-200 hover:bg-slate-50 dark:hover:bg-slate-800 cursor-pointer"
-            >
-              {storeProfile.themeMode === 'dark' ? (
-                <Sun className="w-3.5 h-3.5" />
-              ) : (
-                <Moon className="w-3.5 h-3.5" />
-              )}
-              <span>{storeProfile.themeMode === 'dark' ? 'Clair' : 'Sombre'}</span>
-            </button>
-            <button
-              type="button"
-              onClick={() => setAboutModalTab('about')}
-              className="flex-1 flex items-center justify-center gap-1.5 min-h-[38px] px-2.5 rounded-xl border border-slate-200 dark:border-slate-700 text-xs font-semibold text-slate-700 dark:text-slate-200 hover:bg-slate-50 dark:hover:bg-slate-800 cursor-pointer"
-            >
-              <Info className="w-3.5 h-3.5 text-emerald-600" />
-              <span>À propos</span>
-            </button>
-          </div>
+          )}
         </div>
       </aside>
 
@@ -373,14 +362,11 @@ const ZandoShell: React.FC = () => {
 
           <div className="flex items-center gap-1.5 sm:gap-2 shrink-0">
             {!isOnline && (
-              <span className="inline-flex items-center gap-1 px-2 py-1 rounded-lg bg-amber-100 dark:bg-amber-950/60 text-amber-800 dark:text-amber-300 text-xs font-semibold whitespace-nowrap">
+              <span className="inline-flex items-center gap-1 px-2.5 py-1 rounded-lg bg-amber-100 dark:bg-amber-950/60 text-amber-800 dark:text-amber-300 text-xs font-semibold whitespace-nowrap">
                 <WifiOff className="w-3.5 h-3.5" />
                 <span className="hidden sm:inline">Hors ligne</span>
               </span>
             )}
-            <div className="lg:hidden">
-              <PWAInstallButton compact />
-            </div>
 
             {/* Notification Bell with unread badge */}
             <button
@@ -394,19 +380,6 @@ const ZandoShell: React.FC = () => {
                 <span className="absolute top-1.5 right-1.5 min-w-[16px] h-4 px-1 rounded-full bg-rose-600 text-white text-[10px] font-bold flex items-center justify-center tabular-nums">
                   {unreadNotificationsCount > 9 ? '9+' : unreadNotificationsCount}
                 </span>
-              )}
-            </button>
-
-            <button
-              type="button"
-              onClick={toggleTheme}
-              className="lg:hidden min-h-[40px] min-w-[40px] flex items-center justify-center rounded-xl text-slate-600 dark:text-slate-300 hover:bg-slate-100 dark:hover:bg-slate-800 cursor-pointer"
-              aria-label="Changer de thème"
-            >
-              {storeProfile.themeMode === 'dark' ? (
-                <Sun className="w-4 h-4" />
-              ) : (
-                <Moon className="w-4 h-4" />
               )}
             </button>
 
@@ -564,23 +537,23 @@ const ZandoShell: React.FC = () => {
         </button>
       </nav>
 
-      {/* Modern Right-to-Left Animated "Plus" Drawer */}
+      {/* Modern Right-to-Left Sliding Navigation Drawer */}
       <AnimatePresence>
         {moreOpen && (
           <div
             className="fixed inset-0 z-50 flex justify-end"
             role="dialog"
             aria-modal="true"
-            aria-label="Menu ZANDO Pro"
+            aria-label="Menu de navigation ZANDO Pro"
           >
             {/* Backdrop */}
             <motion.div
               initial={{opacity: 0}}
               animate={{opacity: 1}}
               exit={{opacity: 0}}
-              transition={{duration: 0.22}}
+              transition={{duration: 0.22, ease: 'easeOut'}}
               onClick={() => setMoreOpen(false)}
-              className="fixed inset-0 bg-slate-950/55 backdrop-blur-xs"
+              className="fixed inset-0 bg-slate-950/60 backdrop-blur-xs"
             />
 
             {/* Sliding Panel from Right to Left */}
@@ -588,245 +561,140 @@ const ZandoShell: React.FC = () => {
               initial={{x: '100%'}}
               animate={{x: 0}}
               exit={{x: '100%'}}
-              transition={{type: 'spring', damping: 28, stiffness: 300}}
-              className="relative z-10 w-[88vw] max-w-sm h-full bg-white dark:bg-slate-900 border-l border-slate-200 dark:border-slate-800 shadow-2xl flex flex-col"
+              transition={{type: 'spring', damping: 30, stiffness: 320, mass: 0.9}}
+              className="relative z-10 w-[86vw] max-w-[372px] h-full bg-slate-50 dark:bg-slate-950 rounded-l-3xl border-l border-slate-200/90 dark:border-slate-800 shadow-2xl flex flex-col overflow-hidden"
             >
-              {/* Drawer Header */}
-              <div className="px-4 py-3.5 border-b border-slate-200 dark:border-slate-800 flex items-center justify-between gap-3 shrink-0">
-                <ZandoLogo />
+              {/* Modern Drawer Header */}
+              <div className="px-5 pt-4 pb-3.5 bg-white dark:bg-slate-900 border-b border-slate-200/80 dark:border-slate-800 flex items-center justify-between gap-3 shrink-0">
+                <div className="flex items-center gap-3 min-w-0">
+                  <ZandoLogo compact />
+                  <div className="min-w-0">
+                    <div className="text-sm font-bold text-slate-900 dark:text-white truncate">
+                      {currentStoreTitle}
+                    </div>
+                    <div className="text-[11px] font-medium text-slate-500 dark:text-slate-400 truncate">
+                      {appMode === 'demo' ? 'Espace démo isolé' : 'Espace local actif'} ·{' '}
+                      {storeProfile.currency}
+                    </div>
+                  </div>
+                </div>
                 <button
                   type="button"
                   onClick={() => setMoreOpen(false)}
-                  className="min-h-[40px] min-w-[40px] rounded-xl flex items-center justify-center text-slate-500 hover:bg-slate-100 dark:hover:bg-slate-800 cursor-pointer"
+                  className="min-h-[44px] min-w-[44px] rounded-2xl flex items-center justify-center text-slate-500 dark:text-slate-400 hover:bg-slate-100 dark:hover:bg-slate-800 transition-colors cursor-pointer shrink-0"
                   aria-label="Fermer le menu"
                 >
                   <X className="w-5 h-5" />
                 </button>
               </div>
 
-              {/* Drawer Scrollable Content */}
-              <div className="flex-1 overflow-y-auto p-4 space-y-4">
-                {/* Multi-Store Switcher + Buy/Join */}
-                <div className="rounded-2xl border border-slate-200 dark:border-slate-800 bg-slate-50/80 dark:bg-slate-950/60 p-3.5 space-y-2.5">
-                  <div className="flex items-center justify-between text-xs font-semibold text-slate-600 dark:text-slate-300">
-                    <span>
-                      Mes Boutiques ({storeSlots.length}/{MAX_STORES})
-                    </span>
-                    {storeSlots.length < MAX_STORES && (
-                      <button
-                        type="button"
-                        onClick={() => {
-                          setMoreOpen(false);
-                          setNewStoreModalOpen(true);
-                        }}
-                        className="text-emerald-700 dark:text-emerald-400 hover:underline cursor-pointer"
-                      >
-                        + Ouvrir boutique
-                      </button>
-                    )}
-                  </div>
-
-                  <div className="flex flex-wrap gap-1.5">
-                    {storeSlots.map((slot) => {
-                      const current = appMode === 'real' && slot.id === activeStoreId;
-                      return (
-                        <button
-                          key={slot.id}
-                          type="button"
-                          onClick={async () => {
-                            setMoreOpen(false);
-                            await switchStore(slot.id);
-                          }}
-                          className={`min-h-[36px] px-3 rounded-xl text-xs font-semibold cursor-pointer transition-colors ${
-                            current
-                              ? 'bg-emerald-600 text-white'
-                              : 'bg-white dark:bg-slate-900 border border-slate-200 dark:border-slate-700 text-slate-700 dark:text-slate-200'
-                          }`}
-                        >
-                          {slot.name}
-                          {slot.role === 'collaborator' ? ' · Collab' : ''}
-                        </button>
-                      );
-                    })}
-                  </div>
-
-                  <button
-                    type="button"
-                    onClick={() => {
-                      setMoreOpen(false);
-                      setTransferModal({mode: 'buy'});
-                    }}
-                    className="w-full inline-flex items-center justify-center gap-1.5 min-h-[38px] px-3 rounded-xl border border-slate-200 dark:border-slate-700 bg-white dark:bg-slate-900 text-xs font-semibold text-slate-700 dark:text-slate-200 cursor-pointer"
-                  >
-                    <ArrowLeftRight className="w-3.5 h-3.5 text-emerald-600" />
-                    <span>Acheter / Rejoindre une boutique</span>
-                  </button>
-
-                  <div className="flex gap-2">
+              {/* Quick POS Actions Strip */}
+              {(activePermissions.canRecordSales || securitySettings.pinEnabled) && (
+                <div className="px-4 pt-3.5 pb-1 flex gap-2 shrink-0">
+                  {activePermissions.canRecordSales && (
                     <button
                       type="button"
-                      onClick={() =>
-                        updateSecuritySettings({
-                          privacyModeEnabled: !securitySettings.privacyModeEnabled,
-                        })
-                      }
-                      className="flex-1 min-h-[38px] inline-flex items-center justify-center gap-1.5 rounded-xl border border-slate-200 dark:border-slate-700 bg-white dark:bg-slate-900 text-xs font-semibold cursor-pointer"
+                      onClick={triggerQuickSale}
+                      className="flex-1 min-h-[44px] px-4 rounded-2xl text-xs font-bold flex items-center justify-center gap-2 shadow-xs cursor-pointer transition-opacity hover:opacity-95"
+                      style={{
+                        backgroundColor: 'var(--brand-accent, #059669)',
+                        color: 'var(--brand-accent-fg, #FFFFFF)',
+                      }}
                     >
-                      {securitySettings.privacyModeEnabled ? (
-                        <Eye className="w-3.5 h-3.5 text-emerald-600" />
-                      ) : (
-                        <EyeOff className="w-3.5 h-3.5" />
-                      )}
-                      <span>{securitySettings.privacyModeEnabled ? 'Visible' : 'Discret'}</span>
+                      <Plus className="w-4 h-4" />
+                      <span>Nouvelle vente</span>
                     </button>
-                    {securitySettings.pinEnabled && (
-                      <button
-                        type="button"
-                        onClick={() => {
-                          setMoreOpen(false);
-                          lockAppNow();
-                        }}
-                        className="flex-1 min-h-[38px] inline-flex items-center justify-center gap-1.5 rounded-xl border border-slate-200 dark:border-slate-700 bg-white dark:bg-slate-900 text-xs font-semibold cursor-pointer"
-                      >
-                        <Lock className="w-3.5 h-3.5 text-amber-600" />
-                        <span>Verrouiller</span>
-                      </button>
-                    )}
-                  </div>
+                  )}
+                  {securitySettings.pinEnabled && (
+                    <button
+                      type="button"
+                      onClick={() => {
+                        setMoreOpen(false);
+                        lockAppNow();
+                      }}
+                      className="min-h-[44px] px-3.5 rounded-2xl border border-slate-200 dark:border-slate-800 bg-white dark:bg-slate-900 text-xs font-semibold text-slate-700 dark:text-slate-200 flex items-center justify-center gap-1.5 hover:bg-slate-100 dark:hover:bg-slate-800 cursor-pointer shrink-0"
+                      aria-label="Verrouiller l’application"
+                    >
+                      <Lock className="w-4 h-4 text-amber-600" />
+                      {!activePermissions.canRecordSales && <span>Verrouiller</span>}
+                    </button>
+                  )}
                 </div>
+              )}
 
-                {/* Modules list */}
-                <div className="space-y-1.5">
-                  <div className="px-1 text-[11px] font-bold uppercase tracking-wider text-slate-400">
-                    Modules & Gestion
-                  </div>
-                  {visibleNavItems.map((item) => {
-                    const Icon = item.icon;
-                    const active = route === item.id;
-                    return (
-                      <button
-                        key={item.id}
-                        type="button"
-                        onClick={() => handleNavigate(item.id)}
-                        className={`w-full flex items-center gap-3 min-h-[46px] px-3.5 rounded-xl border text-left transition-colors cursor-pointer ${
-                          active
-                            ? 'border-emerald-600 bg-emerald-50 dark:bg-emerald-950/40 text-emerald-800 dark:text-emerald-300'
-                            : 'border-slate-200/80 dark:border-slate-800 text-slate-800 dark:text-slate-200 hover:bg-slate-50 dark:hover:bg-slate-800'
-                        }`}
-                      >
-                        <Icon className="w-4 h-4 shrink-0 text-emerald-600 dark:text-emerald-400" />
-                        <span className="text-xs font-bold">{item.label}</span>
-                      </button>
-                    );
-                  })}
-                </div>
+              {/* Grouped Interactive Module Tap Lists */}
+              <div className="flex-1 overflow-y-auto px-4 py-3 space-y-5">
+                {DRAWER_GROUPS.map((grp) => {
+                  const items = visibleNavItems.filter((item) => item.group === grp.key);
+                  if (items.length === 0) return null;
+                  return (
+                    <section key={grp.key} className="space-y-1.5">
+                      <h3 className="px-1.5 text-[11px] font-bold uppercase tracking-wider text-slate-400 dark:text-slate-500">
+                        {grp.title}
+                      </h3>
+                      <div className="rounded-2xl bg-white dark:bg-slate-900 border border-slate-200/80 dark:border-slate-800 divide-y divide-slate-100 dark:divide-slate-800/80 overflow-hidden shadow-2xs">
+                        {items.map((item) => {
+                          const Icon = item.icon;
+                          const active = route === item.id;
+                          return (
+                            <button
+                              key={item.id}
+                              type="button"
+                              onClick={() => handleNavigate(item.id)}
+                              className={`w-full flex items-center gap-3 min-h-[54px] px-3.5 py-2.5 text-left transition-colors cursor-pointer ${
+                                active
+                                  ? 'bg-emerald-50/90 dark:bg-emerald-950/35'
+                                  : 'hover:bg-slate-50 dark:hover:bg-slate-800/60 active:bg-slate-100 dark:active:bg-slate-800'
+                              }`}
+                            >
+                              <span
+                                className={`w-9 h-9 rounded-xl flex items-center justify-center shrink-0 transition-colors ${
+                                  active
+                                    ? 'bg-emerald-600 text-white'
+                                    : 'bg-slate-100 dark:bg-slate-800 text-emerald-700 dark:text-emerald-400'
+                                }`}
+                              >
+                                <Icon className="w-4 h-4" />
+                              </span>
+                              <span className="flex-1 min-w-0">
+                                <span
+                                  className={`block text-[13px] font-bold truncate ${
+                                    active
+                                      ? 'text-emerald-800 dark:text-emerald-300'
+                                      : 'text-slate-900 dark:text-slate-100'
+                                  }`}
+                                >
+                                  {item.label}
+                                </span>
+                                <span className="block text-[11px] text-slate-500 dark:text-slate-400 truncate">
+                                  {item.subtitle}
+                                </span>
+                              </span>
+                              <ChevronRight
+                                className={`w-4 h-4 shrink-0 ${
+                                  active
+                                    ? 'text-emerald-600 dark:text-emerald-400'
+                                    : 'text-slate-300 dark:text-slate-600'
+                                }`}
+                              />
+                            </button>
+                          );
+                        })}
+                      </div>
+                    </section>
+                  );
+                })}
+              </div>
 
-                {/* À propos & Confidentialité shortcuts */}
-                <div className="grid grid-cols-2 gap-2 pt-1">
-                  <button
-                    type="button"
-                    onClick={() => {
-                      setMoreOpen(false);
-                      setAboutModalTab('about');
-                    }}
-                    className="min-h-[40px] px-3 rounded-xl border border-slate-200 dark:border-slate-700 text-xs font-semibold flex items-center justify-center gap-1.5 cursor-pointer"
-                  >
-                    <Info className="w-3.5 h-3.5 text-emerald-600" />
-                    <span>À propos</span>
-                  </button>
-                  <button
-                    type="button"
-                    onClick={() => {
-                      setMoreOpen(false);
-                      setAboutModalTab('privacy');
-                    }}
-                    className="min-h-[40px] px-3 rounded-xl border border-slate-200 dark:border-slate-700 text-xs font-semibold flex items-center justify-center gap-1.5 cursor-pointer"
-                  >
-                    <ShieldCheck className="w-3.5 h-3.5 text-emerald-600" />
-                    <span>Confidentialité</span>
-                  </button>
-                </div>
+              {/* Clean Offline Footer */}
+              <div className="px-5 py-3 bg-white dark:bg-slate-900 border-t border-slate-200/80 dark:border-slate-800 text-[11px] font-medium text-slate-500 dark:text-slate-400 flex items-center justify-between shrink-0">
+                <span>ZANDO Pro</span>
+                <span>100% hors ligne local</span>
               </div>
             </motion.aside>
           </div>
         )}
       </AnimatePresence>
-
-      {/* Create New Store Modal (up to 3 stores) */}
-      <SheetModal
-        open={newStoreModalOpen}
-        onClose={() => setNewStoreModalOpen(false)}
-        title={`Ouvrir une nouvelle boutique (${storeSlots.length}/${MAX_STORES})`}
-        maxWidthClass="max-w-md"
-      >
-        <form
-          onSubmit={async (e) => {
-            e.preventDefault();
-            const clean = newStoreName.trim();
-            if (!clean) {
-              notify('Indiquez un nom de boutique.', 'error');
-              return;
-            }
-            setCreatingStore(true);
-            try {
-              await createNewStore(clean, newStoreCurrency);
-              setNewStoreName('');
-              setNewStoreModalOpen(false);
-              handleNavigate('store');
-            } catch (err) {
-              notify(err instanceof Error ? err.message : 'Erreur création boutique.', 'error');
-            } finally {
-              setCreatingStore(false);
-            }
-          }}
-          className="space-y-4"
-        >
-          <p className="text-xs text-slate-600 dark:text-slate-400 leading-relaxed">
-            Chaque boutique dispose de ses propres produits, ventes, clients, catalogues et crédits isolés en local.
-          </p>
-          <div>
-            <label className="block text-xs font-semibold mb-1">Nom de la boutique *</label>
-            <input
-              type="text"
-              required
-              value={newStoreName}
-              onChange={(e) => setNewStoreName(e.target.value)}
-              placeholder="Ex : Ma Boutique Annexe"
-              className="w-full min-h-[44px] px-3.5 rounded-xl border border-slate-200 dark:border-slate-700 bg-white dark:bg-slate-950 text-sm"
-            />
-          </div>
-          <div>
-            <label className="block text-xs font-semibold mb-1">Devise</label>
-            <select
-              value={newStoreCurrency}
-              onChange={(e) => setNewStoreCurrency(e.target.value)}
-              className="w-full min-h-[44px] px-3 rounded-xl border border-slate-200 dark:border-slate-700 bg-white dark:bg-slate-950 text-sm"
-            >
-              {['FCFA', 'XOF', 'XAF', 'CDF', 'GNF', 'MAD', 'EUR (€)', 'USD ($)'].map((c) => (
-                <option key={c} value={c}>
-                  {c}
-                </option>
-              ))}
-            </select>
-          </div>
-          <div className="flex gap-3 justify-end">
-            <button
-              type="button"
-              onClick={() => setNewStoreModalOpen(false)}
-              className="min-h-[44px] px-4 rounded-xl border border-slate-200 dark:border-slate-700 text-sm font-semibold cursor-pointer"
-            >
-              Annuler
-            </button>
-            <button
-              type="submit"
-              disabled={creatingStore}
-              className="min-h-[44px] px-5 rounded-xl bg-emerald-600 hover:bg-emerald-700 text-white text-sm font-semibold cursor-pointer disabled:opacity-50"
-            >
-              {creatingStore ? 'Création...' : 'Créer & ouvrir'}
-            </button>
-          </div>
-        </form>
-      </SheetModal>
 
       {/* Leave Demo Confirmation Modal */}
       <SheetModal
@@ -866,18 +734,6 @@ const ZandoShell: React.FC = () => {
         open={notificationsOpen}
         onClose={() => setNotificationsOpen(false)}
         onNavigate={handleNavigate}
-      />
-
-      <StoreTransferModal
-        state={transferModal}
-        onClose={() => setTransferModal(null)}
-      />
-
-      <AboutPrivacyModal
-        open={aboutModalTab !== null}
-        initialTab={aboutModalTab || 'about'}
-        zandoDeviceId={zandoDeviceId}
-        onClose={() => setAboutModalTab(null)}
       />
 
       <DemoOnboardingOverlay

@@ -14,6 +14,7 @@ const ROOT_DIR =
 function resolveBasePath(): string {
   const explicit = process.env.VITE_BASE_PATH?.trim();
   if (explicit) {
+    if (explicit === './' || explicit === '.') return './';
     return explicit === '/' ? '/' : `/${explicit.replace(/^\/+|\/+$/g, '')}/`;
   }
   if (process.env.GITHUB_ACTIONS === 'true' && process.env.GITHUB_REPOSITORY) {
@@ -22,7 +23,9 @@ function resolveBasePath(): string {
       return `/${repo}/`;
     }
   }
-  return '/';
+  // Chemin relatif par défaut : indispensable pour Website 2 APK Builder (file:///android_asset/)
+  // ainsi que pour les hébergements statiques en sous-dossier.
+  return './';
 }
 
 export default defineConfig(() => {
@@ -76,7 +79,7 @@ export default defineConfig(() => {
           cleanupOutdatedCaches: true,
           clientsClaim: true,
           skipWaiting: true,
-          navigateFallback: 'index.html',
+          navigateFallback: base === './' ? null : 'index.html',
           navigateFallbackDenylist: [/\/api\//, /\/c\//],
           ignoreURLParametersMatching: [/.*/],
           runtimeCaching: [

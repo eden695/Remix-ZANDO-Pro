@@ -19,8 +19,19 @@ function getCatalogApiOrigin(): string {
 export function isStaticHostWithoutBackend(): boolean {
   if (typeof window === 'undefined') return false;
   if (getCatalogApiOrigin()) return false;
+  const proto = window.location.protocol.toLowerCase();
+  if (
+    proto === 'file:' ||
+    proto === 'content:' ||
+    proto === 'capacitor:' ||
+    proto === 'ionic:'
+  ) {
+    return true;
+  }
   const host = window.location.hostname.toLowerCase();
+  if (!host) return true;
   return (
+    host === 'appassets.androidplatform.net' ||
     host.endsWith('.github.io') ||
     host.endsWith('.pages.dev') ||
     host.endsWith('.netlify.app')

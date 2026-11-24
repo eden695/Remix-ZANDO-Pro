@@ -341,7 +341,7 @@ export interface StoreTransferEnvelope {
   note?: string;
   permissions?: StorePermissions;
   createdAt: number;
-  alg: 'AES-256-GCM' | 'XOR-OBF-V1';
+  alg: 'AES-256-GCM' | 'SHA256-STREAM-V1' | 'XOR-OBF-V1';
   salt?: string;
   iv?: string;
   ciphertext: string;
