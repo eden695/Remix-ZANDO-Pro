@@ -8,8 +8,11 @@ import type {Request, Response} from 'express';
 const PORT = Number(process.env.PORT) || 3000;
 const APP_VERSION = '2.1.0';
 const CATALOGS_DIR = path.resolve(process.cwd(), 'data', 'catalogs');
+const TRANSFERS_DIR = path.resolve(process.cwd(), 'data', 'transfers');
 const SLUG_RE = /^[a-z0-9][a-z0-9_-]{2,63}$/;
 const PRODUCT_ID_RE = /^[a-zA-Z0-9_-]{1,64}$/;
+const ZANDO_ID_RE = /^ZND-[A-Z0-9]{4}-[A-Z0-9]{4}$/;
+const TRANSFER_ID_RE = /^[a-zA-Z0-9_-]{4,64}$/;
 
 interface PublishedCatalogRecord {
   slug: string;
@@ -25,6 +28,23 @@ interface PublishedCatalogRecord {
 
 async function ensureCatalogDir(): Promise<void> {
   await fs.mkdir(CATALOGS_DIR, {recursive: true});
+  await fs.mkdir(TRANSFERS_DIR, {recursive: true});
+}
+
+function resolveTransferReceiverDir(zandoId: string): string | null {
+  const normalized = zandoId.trim().toUpperCase();
+  if (!ZANDO_ID_RE.test(normalized)) return null;
+  const resolved = path.resolve(TRANSFERS_DIR, normalized);
+  if (!resolved.startsWith(TRANSFERS_DIR + path.sep)) return null;
+  return resolved;
+}
+
+function resolveTransferFilePath(zandoId: string, transferId: string): string | null {
+  const dir = resolveTransferReceiverDir(zandoId);
+  if (!dir || !TRANSFER_ID_RE.test(transferId)) return null;
+  const resolved = path.resolve(dir, `${transferId}.json`);
+  if (!resolved.startsWith(dir + path.sep)) return null;
+  return resolved;
 }
 
 function resolveCatalogPath(slug: string): string | null {
@@ -211,6 +231,87 @@ async function startServer(): Promise<void> {
       return;
     }
 
+    await fs.unlink(filePath).catch(() => {});
+    res.json({deleted: true});
+  });
+
+  app.post('/api/transfers', async (req: Request, res: Response) => {
+    try {
+      const body = req.body as Record<string, unknown> | undefined;
+      if (!body || typeof body !== 'object' || body.format !== 'zando-pro-store-transfer') {
+        res.status(400).json({error: 'Enveloppe de transfert invalide.'});
+        return;
+      }
+      const receiverZandoId =
+        typeof body.receiverZandoId === 'string' ? body.receiverZandoId.trim().toUpperCase() : '';
+      const transferId = typeof body.transferId === 'string' ? body.transferId.trim() : '';
+      const filePath = resolveTransferFilePath(receiverZandoId, transferId);
+      const receiverDir = resolveTransferReceiverDir(receiverZandoId);
+
+      if (!filePath || !receiverDir || typeof body.ciphertext !== 'string') {
+        res.status(400).json({error: 'Identifiant destinataire ou données de transfert invalides.'});
+        return;
+      }
+
+      await fs.mkdir(receiverDir, {recursive: true});
+      const existingFiles = (await fs.readdir(receiverDir).catch(() => [])).filter((f) =>
+        f.endsWith('.json'),
+      );
+      if (existingFiles.length >= 10) {
+        existingFiles.sort();
+        for (const oldFile of existingFiles.slice(0, existingFiles.length - 9)) {
+          await fs.unlink(path.resolve(receiverDir, oldFile)).catch(() => {});
+        }
+      }
+
+      const tmpPath = `${filePath}.${crypto.randomBytes(6).toString('hex')}.tmp`;
+      await fs.writeFile(tmpPath, JSON.stringify(body), 'utf8');
+      await fs.rename(tmpPath, filePath);
+
+      res.json({ok: true, transferId, receiverZandoId});
+    } catch (err) {
+      console.error('Error storing transfer:', err);
+      res.status(500).json({error: 'Erreur serveur lors de l’envoi du transfert.'});
+    }
+  });
+
+  app.get('/api/transfers/:zandoId', async (req: Request, res: Response) => {
+    const receiverDir = resolveTransferReceiverDir(String(req.params.zandoId || ''));
+    if (!receiverDir) {
+      res.status(400).json({error: 'Identifiant ZANDO invalide.'});
+      return;
+    }
+    res.setHeader('Cache-Control', 'no-store');
+    try {
+      const files = (await fs.readdir(receiverDir).catch(() => [])).filter((f) =>
+        f.endsWith('.json'),
+      );
+      const transfers: unknown[] = [];
+      for (const file of files) {
+        const resolved = path.resolve(receiverDir, file);
+        if (!resolved.startsWith(receiverDir + path.sep)) continue;
+        try {
+          const raw = await fs.readFile(resolved, 'utf8');
+          transfers.push(JSON.parse(raw));
+        } catch {
+          // Skip malformed transfer file
+        }
+      }
+      res.json({transfers});
+    } catch {
+      res.json({transfers: []});
+    }
+  });
+
+  app.delete('/api/transfers/:zandoId/:transferId', async (req: Request, res: Response) => {
+    const filePath = resolveTransferFilePath(
+      String(req.params.zandoId || ''),
+      String(req.params.transferId || ''),
+    );
+    if (!filePath) {
+      res.status(400).json({error: 'Paramètres de suppression invalides.'});
+      return;
+    }
     await fs.unlink(filePath).catch(() => {});
     res.json({deleted: true});
   });

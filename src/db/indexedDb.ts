@@ -12,6 +12,8 @@ import {
   Sale,
   SavedCatalog,
   SchemaMeta,
+  StoreCollaborator,
+  StorePermissions,
   StoreProfile,
   StoreSlot,
 } from '../types/commerce';
@@ -135,24 +137,35 @@ export function getActiveStoreSlot(): StoreSlot {
   return slots.find((s) => s.id === activeId) ?? slots[0];
 }
 
-export function createStoreSlot(name: string, currency = 'FCFA'): StoreSlot {
+export function createStoreSlot(
+  name: string,
+  currency = 'FCFA',
+  extras?: Partial<StoreSlot>,
+): StoreSlot {
   const slots = getStoreSlots();
   if (slots.length >= MAX_STORES) {
     throw new Error(`Limite maximale atteinte : vous pouvez ouvrir jusqu’à ${MAX_STORES} boutiques.`);
   }
   const usedIds = new Set(slots.map((s) => s.id));
-  let slotNumber = 2;
-  while (usedIds.has(`store_${slotNumber}`) && slotNumber <= MAX_STORES + 2) {
+  const usedDbs = new Set(slots.map((s) => s.dbName));
+  let slotNumber = 1;
+  while (
+    (usedIds.has(`store_${slotNumber}`) ||
+      usedDbs.has(slotNumber === 1 ? REAL_DB_NAME : `${REAL_DB_NAME}_${slotNumber}`)) &&
+    slotNumber <= MAX_STORES + 10
+  ) {
     slotNumber += 1;
   }
   const id = `store_${slotNumber}`;
-  const dbName = `${REAL_DB_NAME}_${slotNumber}`;
+  const dbName = slotNumber === 1 ? REAL_DB_NAME : `${REAL_DB_NAME}_${slotNumber}`;
   const newSlot: StoreSlot = {
     id,
     dbName,
     name: name.trim() || `Boutique ${slotNumber}`,
     currency,
     createdAt: Date.now(),
+    role: 'owner',
+    ...extras,
   };
   const next = [...slots, newSlot];
   saveStoreSlots(next);
@@ -174,15 +187,40 @@ export function updateStoreSlotMeta(id: string, name: string, currency: string):
   saveStoreSlots(next);
 }
 
-export async function deleteStoreSlot(id: string): Promise<string> {
+export function updateStoreCollaborators(id: string, collaborators: StoreCollaborator[]): void {
   const slots = getStoreSlots();
-  if (slots.length <= 1) {
-    throw new Error('Vous devez conserver au moins une boutique active.');
-  }
+  const next = slots.map((s) => (s.id === id ? {...s, collaborators} : s));
+  saveStoreSlots(next);
+}
+
+export async function deleteStoreSlot(
+  id: string,
+  options?: {allowResetIfLast?: boolean},
+): Promise<string> {
+  const slots = getStoreSlots();
   const target = slots.find((s) => s.id === id);
   if (!target) {
     throw new Error('Boutique introuvable.');
   }
+  if (slots.length <= 1) {
+    if (!options?.allowResetIfLast) {
+      throw new Error('Vous devez conserver au moins une boutique active.');
+    }
+    await closeAndClearDbCache(target.dbName);
+    await clearDatabaseStoreContents(target.dbName);
+    const resetSlot: StoreSlot = {
+      id: target.id,
+      dbName: target.dbName,
+      name: 'Ma Boutique',
+      currency: 'FCFA',
+      createdAt: Date.now(),
+      role: 'owner',
+    };
+    saveStoreSlots([resetSlot]);
+    setActiveStoreId(resetSlot.id);
+    return resetSlot.id;
+  }
+
   await closeAndClearDbCache(target.dbName);
   const remaining = slots.filter((s) => s.id !== id);
   saveStoreSlots(remaining);
@@ -198,6 +236,47 @@ export async function deleteStoreSlot(id: string): Promise<string> {
     });
   }
   return nextActiveId;
+}
+
+export async function isStoreSlotEmpty(dbName: string): Promise<boolean> {
+  try {
+    const db = await openZandoDB(dbName);
+    const tx = db.transaction([STORES.PRODUCTS, STORES.SALES, STORES.ORDERS, STORES.CUSTOMERS], 'readonly');
+    const [p, s, o, c] = await Promise.all([
+      idbReq<number>(tx.objectStore(STORES.PRODUCTS).count()),
+      idbReq<number>(tx.objectStore(STORES.SALES).count()),
+      idbReq<number>(tx.objectStore(STORES.ORDERS).count()),
+      idbReq<number>(tx.objectStore(STORES.CUSTOMERS).count()),
+    ]);
+    return p === 0 && s === 0 && o === 0 && c === 0;
+  } catch {
+    return false;
+  }
+}
+
+export function markSlotAsCollaborator(
+  id: string,
+  ownerZandoId: string,
+  collaboratorName: string | undefined,
+  permissions: StorePermissions,
+  name: string,
+  currency: string,
+): void {
+  const slots = getStoreSlots();
+  const next = slots.map((s) =>
+    s.id === id
+      ? {
+          ...s,
+          name,
+          currency,
+          role: 'collaborator' as const,
+          ownerZandoId,
+          collaboratorName,
+          permissions,
+        }
+      : s,
+  );
+  saveStoreSlots(next);
 }
 
 export function getStoredAppMode(): AppMode {

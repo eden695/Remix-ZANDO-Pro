@@ -1,5 +1,6 @@
 import {
   AppSecuritySettings,
+  LockMethod,
   ProAppSettings,
   SecurityAuditEntry,
 } from '../types/commerce';
@@ -9,13 +10,16 @@ const SECURITY_SETTINGS_KEY = 'zando_pro_security_settings_v1';
 const PRO_SETTINGS_KEY = 'zando_pro_app_settings_v1';
 const AUDIT_LOG_KEY = 'zando_pro_security_audit_v1';
 const LOCK_COOLDOWN_KEY = 'zando_pro_lock_cooldown_v1';
+const ZANDO_DEVICE_ID_KEY = 'zando_pro_device_id_v1';
 
 export const DEFAULT_SECURITY_SETTINGS: AppSecuritySettings = {
   pinEnabled: false,
-  autoLockMinutes: 5,
+  lockMethod: 'pin',
+  autoLockSeconds: 300,
   requirePinForSensitiveActions: true,
   privacyModeEnabled: false,
   backupReminderDays: 14,
+  browserNotificationsEnabled: false,
 };
 
 export const DEFAULT_PRO_SETTINGS: ProAppSettings = {
@@ -27,11 +31,61 @@ export const DEFAULT_PRO_SETTINGS: ProAppSettings = {
   soundFeedback: true,
 };
 
+export function getLockMethodLabel(method?: LockMethod): string {
+  if (method === 'password') return 'Mot de passe';
+  if (method === 'pattern') return 'Schéma';
+  return 'Code PIN';
+}
+
+export function getOrCreateZandoDeviceId(): string {
+  try {
+    const existing = localStorage.getItem(ZANDO_DEVICE_ID_KEY);
+    if (existing && /^ZND-[A-Z0-9]{4}-[A-Z0-9]{4}$/.test(existing)) {
+      return existing;
+    }
+  } catch {
+    // Ignore storage access issue
+  }
+
+  const alphabet = 'ABCDEFGHJKLMNPQRSTUVWXYZ23456789';
+  const bytes = new Uint8Array(8);
+  if (typeof crypto !== 'undefined' && crypto.getRandomValues) {
+    crypto.getRandomValues(bytes);
+  } else {
+    for (let i = 0; i < bytes.length; i++) {
+      bytes[i] = Math.floor(Math.random() * 256);
+    }
+  }
+  let code = '';
+  for (let i = 0; i < 8; i++) {
+    code += alphabet[bytes[i] % alphabet.length];
+  }
+  const formatted = `ZND-${code.slice(0, 4)}-${code.slice(4, 8)}`;
+  try {
+    localStorage.setItem(ZANDO_DEVICE_ID_KEY, formatted);
+  } catch {
+    // Ignore storage quota error
+  }
+  return formatted;
+}
+
 export function getSecuritySettings(): AppSecuritySettings {
   try {
     const raw = localStorage.getItem(SECURITY_SETTINGS_KEY);
     if (!raw) return DEFAULT_SECURITY_SETTINGS;
-    return {...DEFAULT_SECURITY_SETTINGS, ...JSON.parse(raw)};
+    const parsed = JSON.parse(raw) as Partial<AppSecuritySettings>;
+    const autoLockSeconds =
+      typeof parsed.autoLockSeconds === 'number'
+        ? parsed.autoLockSeconds
+        : typeof parsed.autoLockMinutes === 'number'
+          ? parsed.autoLockMinutes * 60
+          : DEFAULT_SECURITY_SETTINGS.autoLockSeconds;
+    return {
+      ...DEFAULT_SECURITY_SETTINGS,
+      ...parsed,
+      lockMethod: parsed.lockMethod || 'pin',
+      autoLockSeconds,
+    };
   } catch {
     return DEFAULT_SECURITY_SETTINGS;
   }
@@ -99,15 +153,17 @@ export function clearSecurityAuditLog(): void {
   }
 }
 
-function bytesToBase64(bytes: Uint8Array): string {
+export function bytesToBase64(bytes: Uint8Array): string {
   let binary = '';
-  for (let i = 0; i < bytes.length; i++) {
-    binary += String.fromCharCode(bytes[i]);
+  const chunkSize = 0x8000;
+  for (let i = 0; i < bytes.length; i += chunkSize) {
+    const sub = bytes.subarray(i, Math.min(i + chunkSize, bytes.length));
+    binary += String.fromCharCode(...sub);
   }
   return btoa(binary);
 }
 
-function base64ToBytes(b64: string): Uint8Array {
+export function base64ToBytes(b64: string): Uint8Array {
   const binary = atob(b64);
   const bytes = new Uint8Array(binary.length);
   for (let i = 0; i < binary.length; i++) {
@@ -302,6 +358,109 @@ export async function decryptBackupText(encryptedJson: string, passphrase: strin
   } catch {
     throw new Error('Mot de passe incorrect ou fichier de sauvegarde chiffré altéré.');
   }
+}
+
+export async function encryptForZandoReceiver(
+  plainJson: string,
+  receiverZandoId: string,
+): Promise<{alg: 'AES-256-GCM' | 'XOR-OBF-V1'; salt?: string; iv?: string; ciphertext: string}> {
+  const normalizedTarget = receiverZandoId.trim().toUpperCase();
+  const secretKey = `ZANDO-STORE-TRANSFER::${normalizedTarget}::V1`;
+  const enc = new TextEncoder();
+
+  if (typeof crypto !== 'undefined' && crypto.subtle) {
+    const salt = crypto.getRandomValues(new Uint8Array(16));
+    const iv = crypto.getRandomValues(new Uint8Array(12));
+    const keyMaterial = await crypto.subtle.importKey(
+      'raw',
+      enc.encode(secretKey),
+      {name: 'PBKDF2'},
+      false,
+      ['deriveKey'],
+    );
+    const aesKey = await crypto.subtle.deriveKey(
+      {name: 'PBKDF2', salt, iterations: 60000, hash: 'SHA-256'},
+      keyMaterial,
+      {name: 'AES-GCM', length: 256},
+      false,
+      ['encrypt'],
+    );
+    const cipherBuf = await crypto.subtle.encrypt(
+      {name: 'AES-GCM', iv},
+      aesKey,
+      enc.encode(plainJson),
+    );
+    return {
+      alg: 'AES-256-GCM',
+      salt: bytesToBase64(salt),
+      iv: bytesToBase64(iv),
+      ciphertext: bytesToBase64(new Uint8Array(cipherBuf)),
+    };
+  }
+
+  // Fallback hors-contexte sécurisé
+  const raw = enc.encode(plainJson);
+  const key = enc.encode(secretKey);
+  const out = new Uint8Array(raw.length);
+  for (let i = 0; i < raw.length; i++) {
+    out[i] = raw[i] ^ key[i % key.length];
+  }
+  return {
+    alg: 'XOR-OBF-V1',
+    ciphertext: bytesToBase64(out),
+  };
+}
+
+export async function decryptForZandoReceiver(
+  envelope: {alg: string; salt?: string; iv?: string; ciphertext: string},
+  receiverZandoId: string,
+): Promise<string> {
+  const normalizedTarget = receiverZandoId.trim().toUpperCase();
+  const secretKey = `ZANDO-STORE-TRANSFER::${normalizedTarget}::V1`;
+  const enc = new TextEncoder();
+
+  if (envelope.alg === 'AES-256-GCM') {
+    if (typeof crypto === 'undefined' || !crypto.subtle || !envelope.salt || !envelope.iv) {
+      throw new Error('Déchiffrement AES-GCM impossible dans cet environnement.');
+    }
+    const salt = base64ToBytes(envelope.salt);
+    const iv = base64ToBytes(envelope.iv);
+    const ciphertext = base64ToBytes(envelope.ciphertext);
+    const keyMaterial = await crypto.subtle.importKey(
+      'raw',
+      enc.encode(secretKey),
+      {name: 'PBKDF2'},
+      false,
+      ['deriveKey'],
+    );
+    const aesKey = await crypto.subtle.deriveKey(
+      {name: 'PBKDF2', salt: salt.buffer as ArrayBuffer, iterations: 60000, hash: 'SHA-256'},
+      keyMaterial,
+      {name: 'AES-GCM', length: 256},
+      false,
+      ['decrypt'],
+    );
+    try {
+      const plainBuf = await crypto.subtle.decrypt(
+        {name: 'AES-GCM', iv: iv.buffer as ArrayBuffer},
+        aesKey,
+        ciphertext.buffer as ArrayBuffer,
+      );
+      return new TextDecoder().decode(plainBuf);
+    } catch {
+      throw new Error(
+        'Ce transfert est chiffré pour un autre Identifiant ZANDO Pro. Vérifiez l’identifiant utilisé.',
+      );
+    }
+  }
+
+  const raw = base64ToBytes(envelope.ciphertext);
+  const key = enc.encode(secretKey);
+  const out = new Uint8Array(raw.length);
+  for (let i = 0; i < raw.length; i++) {
+    out[i] = raw[i] ^ key[i % key.length];
+  }
+  return new TextDecoder().decode(out);
 }
 
 export function playSaleFeedbackBeep(enabled: boolean): void {

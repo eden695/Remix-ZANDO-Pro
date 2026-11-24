@@ -1,7 +1,9 @@
 import React, {useEffect, useState} from 'react';
-import {ShieldAlert} from 'lucide-react';
+import {Eye, EyeOff, ShieldAlert} from 'lucide-react';
+import {PatternLockGrid} from './PatternLockGrid';
 import {SheetModal} from './SheetModal';
 import {useStore} from '../context/StoreContext';
+import {getLockMethodLabel} from '../services/securityService';
 
 interface PinConfirmModalProps {
   open: boolean;
@@ -23,29 +25,42 @@ export const PinConfirmModal: React.FC<PinConfirmModalProps> = ({
   onClose,
 }) => {
   const {securitySettings, verifyCurrentPin} = useStore();
-  const [pin, setPin] = useState('');
+  const [secret, setSecret] = useState('');
+  const [showPassword, setShowPassword] = useState(false);
   const [error, setError] = useState('');
   const [busy, setBusy] = useState(false);
 
-  const needsPin = securitySettings.pinEnabled && securitySettings.requirePinForSensitiveActions;
+  const lockMethod = securitySettings.lockMethod || 'pin';
+  const methodLabel = getLockMethodLabel(lockMethod);
+  const needsAuth = securitySettings.pinEnabled && securitySettings.requirePinForSensitiveActions;
 
   useEffect(() => {
     if (!open) {
-      setPin('');
+      setSecret('');
+      setShowPassword(false);
       setError('');
       setBusy(false);
     }
   }, [open]);
+
+  const isSecretReady = () => {
+    if (!needsAuth) return true;
+    if (lockMethod === 'pattern') {
+      return secret.split('-').filter(Boolean).length >= 4;
+    }
+    return secret.length >= 4;
+  };
 
   const handleSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
     setError('');
     setBusy(true);
     try {
-      if (needsPin) {
-        const ok = await verifyCurrentPin(pin);
+      if (needsAuth) {
+        const ok = await verifyCurrentPin(secret);
         if (!ok) {
-          setError('Code PIN incorrect.');
+          setError(`${methodLabel} incorrect.`);
+          if (lockMethod === 'pattern') setSecret('');
           setBusy(false);
           return;
         }
@@ -69,24 +84,67 @@ export const PinConfirmModal: React.FC<PinConfirmModalProps> = ({
           <p className="leading-relaxed">{description}</p>
         </div>
 
-        {needsPin && (
+        {needsAuth && (
           <div>
-            <label className="block text-xs font-semibold text-slate-700 dark:text-slate-300 mb-1">
-              Saisissez votre code PIN pour autoriser l’opération *
+            <label className="block text-xs font-semibold text-slate-700 dark:text-slate-300 mb-2">
+              {lockMethod === 'pattern'
+                ? 'Dessinez votre schéma pour autoriser l’opération *'
+                : lockMethod === 'password'
+                  ? 'Saisissez votre mot de passe pour autoriser l’opération *'
+                  : 'Saisissez votre code PIN pour autoriser l’opération *'}
             </label>
-            <input
-              type="password"
-              inputMode="numeric"
-              required
-              autoFocus
-              value={pin}
-              onChange={(e) => {
-                setPin(e.target.value.replace(/\D/g, '').slice(0, 6));
-                setError('');
-              }}
-              placeholder="Code PIN (4 à 6 chiffres)"
-              className="w-full min-h-[44px] px-3.5 rounded-xl border border-slate-200 dark:border-slate-700 bg-white dark:bg-slate-950 text-sm tracking-widest"
-            />
+
+            {lockMethod === 'pattern' ? (
+              <PatternLockGrid
+                errorState={Boolean(error)}
+                helperText={
+                  isSecretReady()
+                    ? 'Schéma saisi — cliquez sur le bouton de confirmation'
+                    : 'Reliez au moins 4 points'
+                }
+                onComplete={(pat) => {
+                  setSecret(pat);
+                  setError('');
+                }}
+              />
+            ) : lockMethod === 'password' ? (
+              <div className="relative">
+                <input
+                  type={showPassword ? 'text' : 'password'}
+                  required
+                  autoFocus
+                  value={secret}
+                  onChange={(e) => {
+                    setSecret(e.target.value);
+                    setError('');
+                  }}
+                  placeholder="Mot de passe (4 car. min.)"
+                  className="w-full min-h-[44px] pl-3.5 pr-10 rounded-xl border border-slate-200 dark:border-slate-700 bg-white dark:bg-slate-950 text-sm"
+                />
+                <button
+                  type="button"
+                  onClick={() => setShowPassword((v) => !v)}
+                  className="absolute right-2 top-1/2 -translate-y-1/2 w-8 h-8 flex items-center justify-center text-slate-400 cursor-pointer"
+                  aria-label="Afficher ou masquer"
+                >
+                  {showPassword ? <EyeOff className="w-4 h-4" /> : <Eye className="w-4 h-4" />}
+                </button>
+              </div>
+            ) : (
+              <input
+                type="password"
+                inputMode="numeric"
+                required
+                autoFocus
+                value={secret}
+                onChange={(e) => {
+                  setSecret(e.target.value.replace(/\D/g, '').slice(0, 6));
+                  setError('');
+                }}
+                placeholder="Code PIN (4 à 6 chiffres)"
+                className="w-full min-h-[44px] px-3.5 rounded-xl border border-slate-200 dark:border-slate-700 bg-white dark:bg-slate-950 text-sm tracking-widest"
+              />
+            )}
           </div>
         )}
 
@@ -102,7 +160,7 @@ export const PinConfirmModal: React.FC<PinConfirmModalProps> = ({
           </button>
           <button
             type="submit"
-            disabled={busy || (needsPin && pin.length < 4)}
+            disabled={busy || !isSecretReady()}
             className={`min-h-[44px] px-5 rounded-xl text-white text-sm font-semibold cursor-pointer disabled:opacity-50 ${
               danger ? 'bg-rose-600 hover:bg-rose-700' : 'bg-emerald-600 hover:bg-emerald-700'
             }`}

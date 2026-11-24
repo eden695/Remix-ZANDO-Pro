@@ -1,5 +1,6 @@
 import React, {useEffect, useMemo, useRef, useState} from 'react';
 import {
+  ArrowLeftRight,
   CheckCircle2,
   ExternalLink,
   ImagePlus,
@@ -10,15 +11,21 @@ import {
   Store,
   Sun,
   Trash2,
+  Users,
 } from 'lucide-react';
 import {BlobImage} from '../components/BlobImage';
 import {ModernSelect} from '../components/ModernSelect';
 import {PageColorPipette} from '../components/PageColorPipette';
+import {PinConfirmModal} from '../components/PinConfirmModal';
+import {
+  StoreTransferModal,
+  StoreTransferModalState,
+} from '../components/StoreTransferModal';
 import {useStore} from '../context/StoreContext';
 import {MAX_STORES} from '../db/indexedDb';
 import {copyTextSafely, openWhatsAppChat} from '../services/androidShareService';
 import {deleteMediaBlob, saveCompressedImageBlob} from '../services/mediaService';
-import {ProductLayoutMode, StoreProfile, ThemeMode} from '../types/commerce';
+import {ProductLayoutMode, StoreProfile, StoreSlot, ThemeMode} from '../types/commerce';
 import {analyzeWhatsAppPhone, getContrastTextColor} from '../utils/format';
 
 const CURRENCIES = ['FCFA', 'XOF', 'XAF', 'CDF', 'GNF', 'MAD', 'EUR (€)', 'USD ($)'];
@@ -30,8 +37,11 @@ export const StoreIdentityModule: React.FC = () => {
     products,
     storeSlots,
     activeStoreId,
+    activeStoreSlot,
+    activePermissions,
     switchStore,
     createNewStore,
+    removeStoreSlot,
     saveStoreProfile,
     notify,
   } = useStore();
@@ -42,6 +52,8 @@ export const StoreIdentityModule: React.FC = () => {
   const [creatingSlot, setCreatingSlot] = useState(false);
   const [newStoreName, setNewStoreName] = useState('');
   const [newStoreCurrency, setNewStoreCurrency] = useState('FCFA');
+  const [transferModal, setTransferModal] = useState<StoreTransferModalState>(null);
+  const [deleteTarget, setDeleteTarget] = useState<StoreSlot | null>(null);
 
   const logoInputRef = useRef<HTMLInputElement>(null);
   const bannerInputRef = useRef<HTMLInputElement>(null);
@@ -142,45 +154,92 @@ export const StoreIdentityModule: React.FC = () => {
                 ZANDO Pro permet de gérer jusqu’à {MAX_STORES} boutiques indépendantes sur cet appareil.
               </p>
             </div>
-            {storeSlots.length < MAX_STORES && (
+            <div className="flex flex-wrap gap-2">
               <button
                 type="button"
-                onClick={() => setCreatingSlot((v) => !v)}
-                className="inline-flex items-center gap-1.5 min-h-[40px] px-3.5 rounded-xl border border-emerald-300 dark:border-emerald-800 bg-emerald-50 dark:bg-emerald-950/40 text-emerald-800 dark:text-emerald-300 text-xs font-semibold cursor-pointer"
+                onClick={() => setTransferModal({mode: 'buy'})}
+                className="inline-flex items-center gap-1.5 min-h-[40px] px-3.5 rounded-xl border border-slate-200 dark:border-slate-700 text-xs font-semibold hover:bg-slate-50 dark:hover:bg-slate-800 cursor-pointer"
               >
-                <Plus className="w-4 h-4" />
-                <span>Ouvrir une boutique</span>
+                <ArrowLeftRight className="w-4 h-4 text-emerald-600" />
+                <span>Acheter / Rejoindre</span>
               </button>
-            )}
+              {storeSlots.length < MAX_STORES && (
+                <button
+                  type="button"
+                  onClick={() => setCreatingSlot((v) => !v)}
+                  className="inline-flex items-center gap-1.5 min-h-[40px] px-3.5 rounded-xl border border-emerald-300 dark:border-emerald-800 bg-emerald-50 dark:bg-emerald-950/40 text-emerald-800 dark:text-emerald-300 text-xs font-semibold cursor-pointer"
+                >
+                  <Plus className="w-4 h-4" />
+                  <span>Ouvrir une boutique</span>
+                </button>
+              )}
+            </div>
           </div>
 
           <div className="grid grid-cols-1 sm:grid-cols-3 gap-2.5">
             {storeSlots.map((slot, idx) => {
               const isActive = appMode === 'real' && slot.id === activeStoreId;
+              const isCollab = slot.role === 'collaborator';
               return (
-                <button
+                <div
                   key={slot.id}
-                  type="button"
-                  onClick={async () => {
-                    await switchStore(slot.id);
-                    notify(`Boutique active : ${slot.name}`, 'info');
-                  }}
-                  className={`p-3 rounded-xl border text-left transition-colors cursor-pointer ${
+                  className={`p-3 rounded-xl border text-left transition-colors flex flex-col justify-between gap-2.5 ${
                     isActive
                       ? 'border-emerald-600 bg-emerald-50/70 dark:bg-emerald-950/30'
                       : 'border-slate-200 dark:border-slate-800 hover:bg-slate-50 dark:hover:bg-slate-800/50'
                   }`}
                 >
-                  <div className="text-[11px] font-semibold text-slate-500 dark:text-slate-400">
-                    Boutique {idx + 1} · {slot.currency}
+                  <button
+                    type="button"
+                    onClick={() => switchStore(slot.id)}
+                    className="text-left w-full cursor-pointer"
+                  >
+                    <div className="text-[11px] font-semibold text-slate-500 dark:text-slate-400">
+                      Boutique {idx + 1} · {slot.currency}
+                      {isCollab ? ' · Collaboration' : ''}
+                    </div>
+                    <div className="text-sm font-bold text-slate-900 dark:text-white truncate mt-0.5">
+                      {slot.name}
+                    </div>
+                    <div className="text-[11px] text-emerald-700 dark:text-emerald-400 font-semibold mt-1">
+                      {isActive ? 'Ouverte maintenant' : 'Cliquer pour ouvrir'}
+                    </div>
+                  </button>
+
+                  <div className="flex flex-wrap items-center gap-1.5 pt-1 border-t border-slate-200/70 dark:border-slate-800">
+                    {!isCollab && (
+                      <>
+                        <button
+                          type="button"
+                          onClick={() => setTransferModal({mode: 'collaborate', store: slot})}
+                          className="inline-flex items-center gap-1 px-2.5 py-1 rounded-lg border border-slate-200 dark:border-slate-700 text-[11px] font-semibold hover:bg-white dark:hover:bg-slate-900 cursor-pointer"
+                        >
+                          <Users className="w-3 h-3 text-sky-600" />
+                          <span>Collab</span>
+                        </button>
+                        <button
+                          type="button"
+                          onClick={() => setTransferModal({mode: 'sell', store: slot})}
+                          className="inline-flex items-center gap-1 px-2.5 py-1 rounded-lg border border-amber-300 dark:border-amber-800 text-[11px] font-semibold text-amber-800 dark:text-amber-300 cursor-pointer"
+                        >
+                          <ArrowLeftRight className="w-3 h-3" />
+                          <span>Vendre</span>
+                        </button>
+                      </>
+                    )}
+                    {storeSlots.length > 1 && (
+                      <button
+                        type="button"
+                        onClick={() => setDeleteTarget(slot)}
+                        className="ml-auto p-1.5 rounded-lg text-rose-600 hover:bg-rose-50 dark:hover:bg-rose-950/40 cursor-pointer"
+                        title="Supprimer cette boutique"
+                        aria-label={`Supprimer ${slot.name}`}
+                      >
+                        <Trash2 className="w-3.5 h-3.5" />
+                      </button>
+                    )}
                   </div>
-                  <div className="text-sm font-bold text-slate-900 dark:text-white truncate mt-0.5">
-                    {slot.name}
-                  </div>
-                  <div className="text-[11px] text-emerald-700 dark:text-emerald-400 font-semibold mt-1">
-                    {isActive ? 'Ouverte maintenant' : 'Cliquer pour ouvrir'}
-                  </div>
-                </button>
+                </div>
               );
             })}
           </div>
@@ -212,10 +271,9 @@ export const StoreIdentityModule: React.FC = () => {
                     return;
                   }
                   try {
-                    const created = await createNewStore(clean, newStoreCurrency);
+                    await createNewStore(clean, newStoreCurrency);
                     setNewStoreName('');
                     setCreatingSlot(false);
-                    notify(`Boutique « ${created.name} » créée et activée.`, 'success');
                   } catch (err) {
                     notify(err instanceof Error ? err.message : 'Erreur création boutique.', 'error');
                   }
@@ -228,9 +286,16 @@ export const StoreIdentityModule: React.FC = () => {
           )}
         </section>
 
+        {appMode !== 'demo' && activeStoreSlot?.role === 'collaborator' && !activePermissions.canManageSettings && (
+          <div className="rounded-2xl border border-sky-200 dark:border-sky-900/60 bg-sky-50 dark:bg-sky-950/30 p-4 text-xs text-sky-900 dark:text-sky-200">
+            Vous utilisez cette boutique en <strong>Collaboration</strong> (propriétaire :{' '}
+            <span className="font-mono">{activeStoreSlot.ownerZandoId}</span>). La modification des réglages d’identité est réservée au propriétaire.
+          </div>
+        )}
+
         <form onSubmit={handleSubmit} className="space-y-6">
           <div className="rounded-2xl border border-slate-200 dark:border-slate-800 bg-white dark:bg-slate-900 p-4 text-xs sm:text-sm text-slate-600 dark:text-slate-300">
-            Personnalisez ici l’identité de votre boutique active (utilisée sur votre vitrine, vos boutons d’action et vos catalogues HTML/PDF exportés). Le logo officiel <strong>ZANDO Pro</strong> reste celui de l’application principale.
+            Personnalisez ici l’identité de votre boutique active (utilisée sur votre vitrine, vos boutons d’action et vos catalogues HTML/PDF exportés).
           </div>
 
         {/* Logo & Banner */}
@@ -705,6 +770,25 @@ export const StoreIdentityModule: React.FC = () => {
         }
         onPickColor={handlePipettePick}
         onCancel={() => setPipetteTarget(null)}
+      />
+
+      <StoreTransferModal
+        state={transferModal}
+        onClose={() => setTransferModal(null)}
+      />
+
+      <PinConfirmModal
+        open={!!deleteTarget}
+        onClose={() => setDeleteTarget(null)}
+        title={`Supprimer « ${deleteTarget?.name ?? ''} » ?`}
+        description="Cette opération supprime définitivement la base IndexedDB de cette boutique sur cet appareil."
+        confirmLabel="Supprimer la boutique"
+        danger
+        onConfirm={async () => {
+          if (deleteTarget) {
+            await removeStoreSlot(deleteTarget.id);
+          }
+        }}
       />
     </>
   );

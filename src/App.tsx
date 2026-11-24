@@ -3,14 +3,18 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import React, {useCallback, useState} from 'react';
+import React, {useCallback, useEffect, useMemo, useState} from 'react';
+import {AnimatePresence, motion} from 'motion/react';
 import {
+  ArrowLeftRight,
+  Bell,
   BookOpen,
   ClipboardList,
   Compass,
   CreditCard,
   Eye,
   EyeOff,
+  Info,
   LayoutDashboard,
   Lock,
   LogOut,
@@ -23,17 +27,25 @@ import {
   RotateCcw,
   Settings,
   Share2,
+  ShieldCheck,
   ShoppingCart,
   Store,
   Sun,
   TrendingUp,
   Users,
   WifiOff,
+  X,
 } from 'lucide-react';
+import {AboutPrivacyModal} from './components/AboutPrivacyModal';
 import {AppLockOverlay} from './components/AppLockOverlay';
 import {DemoOnboardingOverlay} from './components/DemoOnboardingOverlay';
+import {NotificationCenterModal} from './components/NotificationCenterModal';
 import {PWAInstallButton} from './components/PWAInstallButton';
 import {SheetModal} from './components/SheetModal';
+import {
+  StoreTransferModal,
+  StoreTransferModalState,
+} from './components/StoreTransferModal';
 import {ToastBanner} from './components/ToastBanner';
 import {ZandoLogo} from './components/ZandoLogo';
 import {StoreProvider, useStore} from './context/StoreContext';
@@ -52,24 +64,26 @@ import {PromotionsModule} from './modules/PromotionsModule';
 import {SalesModule} from './modules/SalesModule';
 import {SocialShareModule} from './modules/SocialShareModule';
 import {StoreIdentityModule} from './modules/StoreIdentityModule';
+import {StorePermissions} from './types/commerce';
 
 const NAV_ITEMS: Array<{
   id: ModuleRoute;
   label: string;
   icon: React.ComponentType<{className?: string}>;
+  requiredPerm?: keyof StorePermissions;
 }> = [
   {id: 'dashboard', label: 'Tableau de bord', icon: LayoutDashboard},
-  {id: 'products', label: 'Produits & Stock', icon: Package},
-  {id: 'sales', label: 'Ventes & Caisse', icon: ShoppingCart},
-  {id: 'finances', label: 'Bénéfices & Dépenses', icon: TrendingUp},
-  {id: 'credits', label: 'Crédits Clients', icon: CreditCard},
+  {id: 'products', label: 'Produits & Stock', icon: Package, requiredPerm: 'canManageProducts'},
+  {id: 'sales', label: 'Ventes & Caisse', icon: ShoppingCart, requiredPerm: 'canRecordSales'},
+  {id: 'finances', label: 'Bénéfices & Dépenses', icon: TrendingUp, requiredPerm: 'canViewFinances'},
+  {id: 'credits', label: 'Crédits Clients', icon: CreditCard, requiredPerm: 'canManageCustomersCredits'},
   {id: 'assistant', label: 'Assistant Local', icon: MessageSquareText},
-  {id: 'orders', label: 'Commandes', icon: ClipboardList},
-  {id: 'customers', label: 'Clients', icon: Users},
-  {id: 'promotions', label: 'Promotions', icon: Percent},
-  {id: 'catalogs', label: 'Catalogues HTML / PDF', icon: BookOpen},
-  {id: 'social', label: 'Publication Sociale', icon: Share2},
-  {id: 'store', label: 'Identité Boutique', icon: Store},
+  {id: 'orders', label: 'Commandes', icon: ClipboardList, requiredPerm: 'canManageOrders'},
+  {id: 'customers', label: 'Clients', icon: Users, requiredPerm: 'canManageCustomersCredits'},
+  {id: 'promotions', label: 'Promotions', icon: Percent, requiredPerm: 'canManageProducts'},
+  {id: 'catalogs', label: 'Catalogues HTML / PDF', icon: BookOpen, requiredPerm: 'canManageCatalogs'},
+  {id: 'social', label: 'Publication Sociale', icon: Share2, requiredPerm: 'canManageCatalogs'},
+  {id: 'store', label: 'Identité Boutique', icon: Store, requiredPerm: 'canManageSettings'},
   {id: 'backup', label: 'Paramètres & Sauvegarde', icon: Settings},
 ];
 
@@ -78,10 +92,14 @@ const ZandoShell: React.FC = () => {
     loading,
     error,
     appMode,
+    zandoDeviceId,
     storeProfile,
     storeSlots,
     activeStoreId,
+    activeStoreSlot,
+    activePermissions,
     securitySettings,
+    unreadNotificationsCount,
     saveStoreProfile,
     reloadAll,
     resetDemoMode,
@@ -96,6 +114,9 @@ const ZandoShell: React.FC = () => {
 
   const [route, setRoute] = useState<ModuleRoute>('dashboard');
   const [moreOpen, setMoreOpen] = useState(false);
+  const [notificationsOpen, setNotificationsOpen] = useState(false);
+  const [aboutModalTab, setAboutModalTab] = useState<'about' | 'privacy' | null>(null);
+  const [transferModal, setTransferModal] = useState<StoreTransferModalState>(null);
   const [guideOpen, setGuideOpen] = useState(false);
   const [leaveDemoConfirmOpen, setLeaveDemoConfirmOpen] = useState(false);
   const [newStoreModalOpen, setNewStoreModalOpen] = useState(false);
@@ -104,6 +125,20 @@ const ZandoShell: React.FC = () => {
   const [creatingStore, setCreatingStore] = useState(false);
   const [quickSaleTrigger, setQuickSaleTrigger] = useState(0);
   const [quickProductTrigger, setQuickProductTrigger] = useState(0);
+
+  const visibleNavItems = useMemo(() => {
+    return NAV_ITEMS.filter((item) => {
+      if (!item.requiredPerm) return true;
+      return activePermissions[item.requiredPerm];
+    });
+  }, [activePermissions]);
+
+  useEffect(() => {
+    const allowed = visibleNavItems.some((i) => i.id === route);
+    if (!allowed) {
+      setRoute('dashboard');
+    }
+  }, [visibleNavItems, route]);
 
   const activeNav = NAV_ITEMS.find((n) => n.id === route) ?? NAV_ITEMS[0];
 
@@ -114,16 +149,24 @@ const ZandoShell: React.FC = () => {
   }, []);
 
   const triggerQuickSale = useCallback(() => {
+    if (!activePermissions.canRecordSales) {
+      notify('Votre rôle en collaboration ne permet pas d’enregistrer des ventes.', 'error');
+      return;
+    }
     setRoute('sales');
     setMoreOpen(false);
     setQuickSaleTrigger((n) => n + 1);
-  }, []);
+  }, [activePermissions.canRecordSales, notify]);
 
   const triggerQuickProduct = useCallback(() => {
+    if (!activePermissions.canManageProducts) {
+      notify('Votre rôle en collaboration ne permet pas de modifier les produits.', 'error');
+      return;
+    }
     setRoute('products');
     setMoreOpen(false);
     setQuickProductTrigger((n) => n + 1);
-  }, []);
+  }, [activePermissions.canManageProducts, notify]);
 
   const consumeQuickSaleTrigger = useCallback(() => setQuickSaleTrigger(0), []);
   const consumeQuickProductTrigger = useCallback(() => setQuickProductTrigger(0), []);
@@ -177,6 +220,8 @@ const ZandoShell: React.FC = () => {
     'backup',
   ].includes(route);
 
+  const isCollabStore = appMode !== 'demo' && activeStoreSlot?.role === 'collaborator';
+
   return (
     <div className="min-h-screen bg-slate-50 dark:bg-slate-950 text-slate-900 dark:text-slate-100 flex">
       {/* Desktop Left Sidebar */}
@@ -186,7 +231,7 @@ const ZandoShell: React.FC = () => {
         </div>
 
         <nav className="flex-1 overflow-y-auto px-3 py-4 space-y-1" aria-label="Navigation principale">
-          {NAV_ITEMS.map((item) => {
+          {visibleNavItems.map((item) => {
             const Icon = item.icon;
             const active = route === item.id;
             return (
@@ -230,22 +275,30 @@ const ZandoShell: React.FC = () => {
                 <button
                   key={slot.id}
                   type="button"
-                  onClick={async () => {
-                    await switchStore(slot.id);
-                    notify(`Boutique active : ${slot.name}`, 'info');
-                  }}
+                  onClick={() => switchStore(slot.id)}
                   className={`w-full flex items-center justify-between gap-2 px-2.5 py-1.5 rounded-lg text-xs font-semibold transition-colors cursor-pointer ${
                     current
                       ? 'bg-emerald-50 dark:bg-emerald-950/50 text-emerald-800 dark:text-emerald-300 border border-emerald-200 dark:border-emerald-800'
                       : 'text-slate-600 dark:text-slate-300 hover:bg-slate-100 dark:hover:bg-slate-800'
                   }`}
                 >
-                  <span className="truncate">{slot.name}</span>
+                  <span className="truncate">
+                    {slot.name}
+                    {slot.role === 'collaborator' ? ' (Collab)' : ''}
+                  </span>
                   <span className="text-[10px] opacity-75 shrink-0">{slot.currency}</span>
                 </button>
               );
             })}
           </div>
+          <button
+            type="button"
+            onClick={() => setTransferModal({mode: 'buy'})}
+            className="w-full inline-flex items-center justify-center gap-1.5 min-h-[34px] px-2.5 rounded-lg border border-slate-200 dark:border-slate-700 text-[11px] font-semibold text-slate-700 dark:text-slate-200 hover:bg-slate-50 dark:hover:bg-slate-800 cursor-pointer"
+          >
+            <ArrowLeftRight className="w-3.5 h-3.5 text-emerald-600" />
+            <span>Acheter / Rejoindre boutique</span>
+          </button>
         </div>
 
         <div className="p-3 border-t border-slate-200 dark:border-slate-800 space-y-2 shrink-0">
@@ -280,25 +333,35 @@ const ZandoShell: React.FC = () => {
               </button>
             )}
           </div>
-          <button
-            type="button"
-            onClick={toggleTheme}
-            className="w-full flex items-center justify-between min-h-[40px] px-3.5 rounded-xl border border-slate-200 dark:border-slate-700 text-xs font-semibold text-slate-700 dark:text-slate-200 hover:bg-slate-50 dark:hover:bg-slate-800 cursor-pointer"
-          >
-            <span>{storeProfile.themeMode === 'dark' ? 'Mode clair' : 'Mode sombre'}</span>
-            {storeProfile.themeMode === 'dark' ? (
-              <Sun className="w-4 h-4" />
-            ) : (
-              <Moon className="w-4 h-4" />
-            )}
-          </button>
+          <div className="flex gap-1.5">
+            <button
+              type="button"
+              onClick={toggleTheme}
+              className="flex-1 flex items-center justify-center gap-1.5 min-h-[38px] px-2.5 rounded-xl border border-slate-200 dark:border-slate-700 text-xs font-semibold text-slate-700 dark:text-slate-200 hover:bg-slate-50 dark:hover:bg-slate-800 cursor-pointer"
+            >
+              {storeProfile.themeMode === 'dark' ? (
+                <Sun className="w-3.5 h-3.5" />
+              ) : (
+                <Moon className="w-3.5 h-3.5" />
+              )}
+              <span>{storeProfile.themeMode === 'dark' ? 'Clair' : 'Sombre'}</span>
+            </button>
+            <button
+              type="button"
+              onClick={() => setAboutModalTab('about')}
+              className="flex-1 flex items-center justify-center gap-1.5 min-h-[38px] px-2.5 rounded-xl border border-slate-200 dark:border-slate-700 text-xs font-semibold text-slate-700 dark:text-slate-200 hover:bg-slate-50 dark:hover:bg-slate-800 cursor-pointer"
+            >
+              <Info className="w-3.5 h-3.5 text-emerald-600" />
+              <span>À propos</span>
+            </button>
+          </div>
         </div>
       </aside>
 
       {/* Main Content Wrapper */}
       <div className="flex-1 lg:pl-64 flex flex-col min-w-0">
-        {/* Sticky Top App Bar */}
-        <header className="sticky top-0 z-20 h-14 bg-white/95 dark:bg-slate-900/95 backdrop-blur-md border-b border-slate-200 dark:border-slate-800 px-4 sm:px-6 flex items-center justify-between gap-4">
+        {/* Single-row Sticky Top App Bar */}
+        <header className="sticky top-0 z-20 h-14 bg-white/95 dark:bg-slate-900/95 backdrop-blur-md border-b border-slate-200 dark:border-slate-800 px-4 sm:px-6 flex items-center justify-between gap-3">
           <div className="flex items-center gap-3 min-w-0">
             <div className="lg:hidden">
               <ZandoLogo compact />
@@ -308,20 +371,36 @@ const ZandoShell: React.FC = () => {
             </h2>
           </div>
 
-          <div className="flex items-center gap-2 shrink-0">
+          <div className="flex items-center gap-1.5 sm:gap-2 shrink-0">
             {!isOnline && (
-              <span className="inline-flex items-center gap-1.5 px-2.5 py-1 rounded-lg bg-amber-100 dark:bg-amber-950/60 text-amber-800 dark:text-amber-300 text-xs font-semibold whitespace-nowrap">
+              <span className="inline-flex items-center gap-1 px-2 py-1 rounded-lg bg-amber-100 dark:bg-amber-950/60 text-amber-800 dark:text-amber-300 text-xs font-semibold whitespace-nowrap">
                 <WifiOff className="w-3.5 h-3.5" />
-                <span>Hors ligne</span>
+                <span className="hidden sm:inline">Hors ligne</span>
               </span>
             )}
             <div className="lg:hidden">
               <PWAInstallButton compact />
             </div>
+
+            {/* Notification Bell with unread badge */}
+            <button
+              type="button"
+              onClick={() => setNotificationsOpen(true)}
+              className="relative min-h-[40px] min-w-[40px] flex items-center justify-center rounded-xl text-slate-600 dark:text-slate-300 hover:bg-slate-100 dark:hover:bg-slate-800 cursor-pointer"
+              aria-label={`Notifications (${unreadNotificationsCount} non lues)`}
+            >
+              <Bell className="w-4 h-4" />
+              {unreadNotificationsCount > 0 && (
+                <span className="absolute top-1.5 right-1.5 min-w-[16px] h-4 px-1 rounded-full bg-rose-600 text-white text-[10px] font-bold flex items-center justify-center tabular-nums">
+                  {unreadNotificationsCount > 9 ? '9+' : unreadNotificationsCount}
+                </span>
+              )}
+            </button>
+
             <button
               type="button"
               onClick={toggleTheme}
-              className="lg:hidden min-h-[44px] min-w-[44px] flex items-center justify-center rounded-xl text-slate-600 dark:text-slate-300 hover:bg-slate-100 dark:hover:bg-slate-800 cursor-pointer"
+              className="lg:hidden min-h-[40px] min-w-[40px] flex items-center justify-center rounded-xl text-slate-600 dark:text-slate-300 hover:bg-slate-100 dark:hover:bg-slate-800 cursor-pointer"
               aria-label="Changer de thème"
             >
               {storeProfile.themeMode === 'dark' ? (
@@ -330,22 +409,25 @@ const ZandoShell: React.FC = () => {
                 <Moon className="w-4 h-4" />
               )}
             </button>
-            <button
-              type="button"
-              onClick={triggerQuickSale}
-              className="hidden sm:inline-flex items-center gap-1.5 min-h-[40px] px-3.5 rounded-xl text-xs font-semibold whitespace-nowrap cursor-pointer"
-              style={{
-                backgroundColor: 'var(--brand-accent, #059669)',
-                color: 'var(--brand-accent-fg, #FFFFFF)',
-              }}
-            >
-              <Plus className="w-4 h-4" />
-              <span>Vente rapide</span>
-            </button>
+
+            {activePermissions.canRecordSales && (
+              <button
+                type="button"
+                onClick={triggerQuickSale}
+                className="hidden sm:inline-flex items-center gap-1.5 min-h-[40px] px-3.5 rounded-xl text-xs font-semibold whitespace-nowrap cursor-pointer"
+                style={{
+                  backgroundColor: 'var(--brand-accent, #059669)',
+                  color: 'var(--brand-accent-fg, #FFFFFF)',
+                }}
+              >
+                <Plus className="w-4 h-4" />
+                <span>Vente rapide</span>
+              </button>
+            )}
           </div>
         </header>
 
-        {/* Demo Mode Isolation Banner (scrollable, never consuming sticky budget) */}
+        {/* Demo Mode Isolation Banner */}
         {appMode === 'demo' && (
           <div className="bg-amber-50 dark:bg-amber-950/40 border-b border-amber-200 dark:border-amber-900/70 px-4 sm:px-6 py-2.5 flex flex-wrap items-center justify-between gap-2 text-xs">
             <div className="font-semibold text-amber-900 dark:text-amber-200">
@@ -376,6 +458,16 @@ const ZandoShell: React.FC = () => {
                 <LogOut className="w-3.5 h-3.5" />
                 <span>Créer mon entreprise</span>
               </button>
+            </div>
+          </div>
+        )}
+
+        {/* Collaborator Mode Banner */}
+        {isCollabStore && (
+          <div className="bg-sky-50 dark:bg-sky-950/40 border-b border-sky-200 dark:border-sky-900/70 px-4 sm:px-6 py-2 flex flex-wrap items-center justify-between gap-2 text-xs text-sky-900 dark:text-sky-200">
+            <div>
+              <strong>Boutique partagée en Collaboration</strong> · Propriétaire :{' '}
+              <span className="font-mono">{activeStoreSlot.ownerZandoId}</span> · Accès selon vos droits attribués.
             </div>
           </div>
         )}
@@ -432,12 +524,21 @@ const ZandoShell: React.FC = () => {
         ).map((tab) => {
           const Icon = tab.icon;
           const active = route === tab.id;
+          const disabled =
+            tab.id === 'products'
+              ? !activePermissions.canManageProducts
+              : tab.id === 'sales'
+                ? !activePermissions.canRecordSales
+                : tab.id === 'finances'
+                  ? !activePermissions.canViewFinances
+                  : false;
           return (
             <button
               key={tab.id}
               type="button"
+              disabled={disabled}
               onClick={() => handleNavigate(tab.id)}
-              className={`flex flex-col items-center justify-center min-h-[44px] text-[11px] font-semibold transition-colors cursor-pointer ${
+              className={`flex flex-col items-center justify-center min-h-[44px] text-[11px] font-semibold transition-colors cursor-pointer disabled:opacity-35 ${
                 active
                   ? 'text-emerald-600 dark:text-emerald-400'
                   : 'text-slate-500 dark:text-slate-400'
@@ -463,123 +564,193 @@ const ZandoShell: React.FC = () => {
         </button>
       </nav>
 
-      {/* Mobile "Plus" Module Hub Sheet */}
-      <SheetModal
-        open={moreOpen}
-        onClose={() => setMoreOpen(false)}
-        title="Modules ZANDO Pro"
-      >
-        <div className="space-y-4">
-          {/* Quick Multi-Store & Security Bar on Mobile */}
-          <div className="rounded-2xl border border-slate-200 dark:border-slate-800 bg-slate-50 dark:bg-slate-950/60 p-3 space-y-2.5">
-            <div className="flex items-center justify-between text-xs font-semibold text-slate-600 dark:text-slate-300">
-              <span>
-                Mes Boutiques ({storeSlots.length}/{MAX_STORES})
-              </span>
-              {storeSlots.length < MAX_STORES && (
-                <button
-                  type="button"
-                  onClick={() => {
-                    setMoreOpen(false);
-                    setNewStoreModalOpen(true);
-                  }}
-                  className="text-emerald-700 dark:text-emerald-400 hover:underline cursor-pointer"
-                >
-                  + Ouvrir boutique
-                </button>
-              )}
-            </div>
-            <div className="flex flex-wrap gap-1.5">
-              {storeSlots.map((slot) => {
-                const current = appMode === 'real' && slot.id === activeStoreId;
-                return (
-                  <button
-                    key={slot.id}
-                    type="button"
-                    onClick={async () => {
-                      await switchStore(slot.id);
-                      setMoreOpen(false);
-                      notify(`Boutique active : ${slot.name}`, 'info');
-                    }}
-                    className={`min-h-[36px] px-3 rounded-xl text-xs font-semibold cursor-pointer ${
-                      current
-                        ? 'bg-emerald-600 text-white'
-                        : 'bg-white dark:bg-slate-900 border border-slate-200 dark:border-slate-700 text-slate-700 dark:text-slate-200'
-                    }`}
-                  >
-                    {slot.name}
-                  </button>
-                );
-              })}
-            </div>
-            <div className="flex gap-2 pt-1">
-              <button
-                type="button"
-                onClick={() =>
-                  updateSecuritySettings({
-                    privacyModeEnabled: !securitySettings.privacyModeEnabled,
-                  })
-                }
-                className="flex-1 min-h-[38px] inline-flex items-center justify-center gap-1.5 rounded-xl border border-slate-200 dark:border-slate-700 bg-white dark:bg-slate-900 text-xs font-semibold cursor-pointer"
-              >
-                {securitySettings.privacyModeEnabled ? (
-                  <Eye className="w-3.5 h-3.5 text-emerald-600" />
-                ) : (
-                  <EyeOff className="w-3.5 h-3.5" />
-                )}
-                <span>{securitySettings.privacyModeEnabled ? 'Afficher montants' : 'Mode Discret'}</span>
-              </button>
-              {securitySettings.pinEnabled && (
-                <button
-                  type="button"
-                  onClick={() => {
-                    setMoreOpen(false);
-                    lockAppNow();
-                  }}
-                  className="flex-1 min-h-[38px] inline-flex items-center justify-center gap-1.5 rounded-xl border border-slate-200 dark:border-slate-700 bg-white dark:bg-slate-900 text-xs font-semibold cursor-pointer"
-                >
-                  <Lock className="w-3.5 h-3.5 text-amber-600" />
-                  <span>Verrouiller</span>
-                </button>
-              )}
-            </div>
-          </div>
+      {/* Modern Right-to-Left Animated "Plus" Drawer */}
+      <AnimatePresence>
+        {moreOpen && (
+          <div
+            className="fixed inset-0 z-50 flex justify-end"
+            role="dialog"
+            aria-modal="true"
+            aria-label="Menu ZANDO Pro"
+          >
+            {/* Backdrop */}
+            <motion.div
+              initial={{opacity: 0}}
+              animate={{opacity: 1}}
+              exit={{opacity: 0}}
+              transition={{duration: 0.22}}
+              onClick={() => setMoreOpen(false)}
+              className="fixed inset-0 bg-slate-950/55 backdrop-blur-xs"
+            />
 
-          <div className="grid grid-cols-2 gap-2.5">
-            {NAV_ITEMS.filter((i) =>
-              [
-                'credits',
-                'assistant',
-                'catalogs',
-                'orders',
-                'customers',
-                'promotions',
-                'social',
-                'store',
-                'backup',
-              ].includes(i.id),
-            ).map((item) => {
-              const Icon = item.icon;
-              const active = route === item.id;
-              return (
+            {/* Sliding Panel from Right to Left */}
+            <motion.aside
+              initial={{x: '100%'}}
+              animate={{x: 0}}
+              exit={{x: '100%'}}
+              transition={{type: 'spring', damping: 28, stiffness: 300}}
+              className="relative z-10 w-[88vw] max-w-sm h-full bg-white dark:bg-slate-900 border-l border-slate-200 dark:border-slate-800 shadow-2xl flex flex-col"
+            >
+              {/* Drawer Header */}
+              <div className="px-4 py-3.5 border-b border-slate-200 dark:border-slate-800 flex items-center justify-between gap-3 shrink-0">
+                <ZandoLogo />
                 <button
-                  key={item.id}
                   type="button"
-                  onClick={() => handleNavigate(item.id)}
-                  className={`flex items-center gap-3 min-h-[54px] px-3.5 py-3 rounded-2xl border text-left transition-colors cursor-pointer ${
-                    active
-                      ? 'border-emerald-600 bg-emerald-50 dark:bg-emerald-950/40 text-emerald-800 dark:text-emerald-300'
-                      : 'border-slate-200 dark:border-slate-800 text-slate-800 dark:text-slate-200 hover:bg-slate-50 dark:hover:bg-slate-800'
-                  }`}
+                  onClick={() => setMoreOpen(false)}
+                  className="min-h-[40px] min-w-[40px] rounded-xl flex items-center justify-center text-slate-500 hover:bg-slate-100 dark:hover:bg-slate-800 cursor-pointer"
+                  aria-label="Fermer le menu"
                 >
-                  <Icon className="w-5 h-5 shrink-0 text-emerald-600 dark:text-emerald-400" />
-                  <span className="text-xs font-bold leading-snug">{item.label}</span>
+                  <X className="w-5 h-5" />
                 </button>
-              );
-            })}
+              </div>
+
+              {/* Drawer Scrollable Content */}
+              <div className="flex-1 overflow-y-auto p-4 space-y-4">
+                {/* Multi-Store Switcher + Buy/Join */}
+                <div className="rounded-2xl border border-slate-200 dark:border-slate-800 bg-slate-50/80 dark:bg-slate-950/60 p-3.5 space-y-2.5">
+                  <div className="flex items-center justify-between text-xs font-semibold text-slate-600 dark:text-slate-300">
+                    <span>
+                      Mes Boutiques ({storeSlots.length}/{MAX_STORES})
+                    </span>
+                    {storeSlots.length < MAX_STORES && (
+                      <button
+                        type="button"
+                        onClick={() => {
+                          setMoreOpen(false);
+                          setNewStoreModalOpen(true);
+                        }}
+                        className="text-emerald-700 dark:text-emerald-400 hover:underline cursor-pointer"
+                      >
+                        + Ouvrir boutique
+                      </button>
+                    )}
+                  </div>
+
+                  <div className="flex flex-wrap gap-1.5">
+                    {storeSlots.map((slot) => {
+                      const current = appMode === 'real' && slot.id === activeStoreId;
+                      return (
+                        <button
+                          key={slot.id}
+                          type="button"
+                          onClick={async () => {
+                            setMoreOpen(false);
+                            await switchStore(slot.id);
+                          }}
+                          className={`min-h-[36px] px-3 rounded-xl text-xs font-semibold cursor-pointer transition-colors ${
+                            current
+                              ? 'bg-emerald-600 text-white'
+                              : 'bg-white dark:bg-slate-900 border border-slate-200 dark:border-slate-700 text-slate-700 dark:text-slate-200'
+                          }`}
+                        >
+                          {slot.name}
+                          {slot.role === 'collaborator' ? ' · Collab' : ''}
+                        </button>
+                      );
+                    })}
+                  </div>
+
+                  <button
+                    type="button"
+                    onClick={() => {
+                      setMoreOpen(false);
+                      setTransferModal({mode: 'buy'});
+                    }}
+                    className="w-full inline-flex items-center justify-center gap-1.5 min-h-[38px] px-3 rounded-xl border border-slate-200 dark:border-slate-700 bg-white dark:bg-slate-900 text-xs font-semibold text-slate-700 dark:text-slate-200 cursor-pointer"
+                  >
+                    <ArrowLeftRight className="w-3.5 h-3.5 text-emerald-600" />
+                    <span>Acheter / Rejoindre une boutique</span>
+                  </button>
+
+                  <div className="flex gap-2">
+                    <button
+                      type="button"
+                      onClick={() =>
+                        updateSecuritySettings({
+                          privacyModeEnabled: !securitySettings.privacyModeEnabled,
+                        })
+                      }
+                      className="flex-1 min-h-[38px] inline-flex items-center justify-center gap-1.5 rounded-xl border border-slate-200 dark:border-slate-700 bg-white dark:bg-slate-900 text-xs font-semibold cursor-pointer"
+                    >
+                      {securitySettings.privacyModeEnabled ? (
+                        <Eye className="w-3.5 h-3.5 text-emerald-600" />
+                      ) : (
+                        <EyeOff className="w-3.5 h-3.5" />
+                      )}
+                      <span>{securitySettings.privacyModeEnabled ? 'Visible' : 'Discret'}</span>
+                    </button>
+                    {securitySettings.pinEnabled && (
+                      <button
+                        type="button"
+                        onClick={() => {
+                          setMoreOpen(false);
+                          lockAppNow();
+                        }}
+                        className="flex-1 min-h-[38px] inline-flex items-center justify-center gap-1.5 rounded-xl border border-slate-200 dark:border-slate-700 bg-white dark:bg-slate-900 text-xs font-semibold cursor-pointer"
+                      >
+                        <Lock className="w-3.5 h-3.5 text-amber-600" />
+                        <span>Verrouiller</span>
+                      </button>
+                    )}
+                  </div>
+                </div>
+
+                {/* Modules list */}
+                <div className="space-y-1.5">
+                  <div className="px-1 text-[11px] font-bold uppercase tracking-wider text-slate-400">
+                    Modules & Gestion
+                  </div>
+                  {visibleNavItems.map((item) => {
+                    const Icon = item.icon;
+                    const active = route === item.id;
+                    return (
+                      <button
+                        key={item.id}
+                        type="button"
+                        onClick={() => handleNavigate(item.id)}
+                        className={`w-full flex items-center gap-3 min-h-[46px] px-3.5 rounded-xl border text-left transition-colors cursor-pointer ${
+                          active
+                            ? 'border-emerald-600 bg-emerald-50 dark:bg-emerald-950/40 text-emerald-800 dark:text-emerald-300'
+                            : 'border-slate-200/80 dark:border-slate-800 text-slate-800 dark:text-slate-200 hover:bg-slate-50 dark:hover:bg-slate-800'
+                        }`}
+                      >
+                        <Icon className="w-4 h-4 shrink-0 text-emerald-600 dark:text-emerald-400" />
+                        <span className="text-xs font-bold">{item.label}</span>
+                      </button>
+                    );
+                  })}
+                </div>
+
+                {/* À propos & Confidentialité shortcuts */}
+                <div className="grid grid-cols-2 gap-2 pt-1">
+                  <button
+                    type="button"
+                    onClick={() => {
+                      setMoreOpen(false);
+                      setAboutModalTab('about');
+                    }}
+                    className="min-h-[40px] px-3 rounded-xl border border-slate-200 dark:border-slate-700 text-xs font-semibold flex items-center justify-center gap-1.5 cursor-pointer"
+                  >
+                    <Info className="w-3.5 h-3.5 text-emerald-600" />
+                    <span>À propos</span>
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() => {
+                      setMoreOpen(false);
+                      setAboutModalTab('privacy');
+                    }}
+                    className="min-h-[40px] px-3 rounded-xl border border-slate-200 dark:border-slate-700 text-xs font-semibold flex items-center justify-center gap-1.5 cursor-pointer"
+                  >
+                    <ShieldCheck className="w-3.5 h-3.5 text-emerald-600" />
+                    <span>Confidentialité</span>
+                  </button>
+                </div>
+              </div>
+            </motion.aside>
           </div>
-        </div>
-      </SheetModal>
+        )}
+      </AnimatePresence>
 
       {/* Create New Store Modal (up to 3 stores) */}
       <SheetModal
@@ -598,10 +769,9 @@ const ZandoShell: React.FC = () => {
             }
             setCreatingStore(true);
             try {
-              const created = await createNewStore(clean, newStoreCurrency);
+              await createNewStore(clean, newStoreCurrency);
               setNewStoreName('');
               setNewStoreModalOpen(false);
-              notify(`Boutique « ${created.name} » créée et ouverte.`, 'success');
               handleNavigate('store');
             } catch (err) {
               notify(err instanceof Error ? err.message : 'Erreur création boutique.', 'error');
@@ -691,6 +861,24 @@ const ZandoShell: React.FC = () => {
           </div>
         </div>
       </SheetModal>
+
+      <NotificationCenterModal
+        open={notificationsOpen}
+        onClose={() => setNotificationsOpen(false)}
+        onNavigate={handleNavigate}
+      />
+
+      <StoreTransferModal
+        state={transferModal}
+        onClose={() => setTransferModal(null)}
+      />
+
+      <AboutPrivacyModal
+        open={aboutModalTab !== null}
+        initialTab={aboutModalTab || 'about'}
+        zandoDeviceId={zandoDeviceId}
+        onClose={() => setAboutModalTab(null)}
+      />
 
       <DemoOnboardingOverlay
         guideOpen={guideOpen}

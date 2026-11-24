@@ -239,22 +239,53 @@ export interface SavedCatalog {
   manageToken?: string;
 }
 
+export type LockMethod = 'pin' | 'password' | 'pattern';
+export type StoreAccessRole = 'owner' | 'collaborator';
+export type CollaboratorPresetRole = 'seller' | 'manager' | 'viewer' | 'custom';
+
+export interface StorePermissions {
+  canManageProducts: boolean;
+  canRecordSales: boolean;
+  canManageOrders: boolean;
+  canManageCustomersCredits: boolean;
+  canViewFinances: boolean;
+  canManageCatalogs: boolean;
+  canManageSettings: boolean;
+}
+
+export interface StoreCollaborator {
+  id: string;
+  zandoId: string;
+  name: string;
+  preset: CollaboratorPresetRole;
+  permissions: StorePermissions;
+  createdAt: number;
+}
+
 export interface StoreSlot {
   id: string;
   dbName: string;
   name: string;
   currency: string;
   createdAt: number;
+  role?: StoreAccessRole;
+  ownerZandoId?: string;
+  collaboratorName?: string;
+  permissions?: StorePermissions;
+  collaborators?: StoreCollaborator[];
 }
 
 export interface AppSecuritySettings {
   pinEnabled: boolean;
+  lockMethod?: LockMethod;
   pinHash?: string;
   pinSalt?: string;
-  autoLockMinutes: number; // 0 = au démarrage / manuel, 1, 5, 15, 30
+  autoLockSeconds: number; // 0 = manuel / démarrage, 15, 30, 60, 300, 900, 1800
+  autoLockMinutes?: number; // rétrocompatibilité
   requirePinForSensitiveActions: boolean;
   privacyModeEnabled: boolean;
   backupReminderDays: number; // 0 = désactivé, 7, 14, 30
+  browserNotificationsEnabled?: boolean;
 }
 
 export interface ProAppSettings {
@@ -271,6 +302,49 @@ export interface SecurityAuditEntry {
   action: string;
   detail: string;
   timestamp: number;
+}
+
+export type NotificationCategory =
+  | 'stock'
+  | 'credit'
+  | 'order'
+  | 'backup'
+  | 'security'
+  | 'transfer'
+  | 'system';
+
+export type NotificationSeverity = 'info' | 'warning' | 'urgent' | 'success';
+
+export interface AppNotification {
+  id: string;
+  category: NotificationCategory;
+  severity: NotificationSeverity;
+  title: string;
+  message: string;
+  createdAt: number;
+  read: boolean;
+  actionRoute?: string;
+  actionLabel?: string;
+  dynamic?: boolean;
+}
+
+export interface StoreTransferEnvelope {
+  format: 'zando-pro-store-transfer';
+  version: 1;
+  transferId: string;
+  kind: 'sale' | 'collaboration';
+  senderZandoId: string;
+  receiverZandoId: string;
+  receiverName?: string;
+  storeName: string;
+  salePrice?: string;
+  note?: string;
+  permissions?: StorePermissions;
+  createdAt: number;
+  alg: 'AES-256-GCM' | 'XOR-OBF-V1';
+  salt?: string;
+  iv?: string;
+  ciphertext: string;
 }
 
 export interface MigrationRecord {

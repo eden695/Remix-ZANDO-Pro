@@ -1,14 +1,20 @@
 import React, {useCallback, useEffect, useRef, useState} from 'react';
 import {
+  ArrowLeftRight,
   ArrowUpCircle,
+  BellRing,
   CheckCircle2,
   Compass,
+  Copy,
   Database,
   Download,
+  Eye,
   EyeOff,
   FileKey2,
+  Grid3X3,
   HardDrive,
   History,
+  Info,
   KeyRound,
   Lock,
   LogOut,
@@ -16,21 +22,24 @@ import {
   Plus,
   RefreshCw,
   RotateCcw,
+  Save,
   Settings2,
   ShieldCheck,
   Sparkles,
   Store,
   Trash2,
   Upload,
+  Users,
 } from 'lucide-react';
+import {AboutPrivacyModal} from '../components/AboutPrivacyModal';
 import {ModernSelect} from '../components/ModernSelect';
+import {PatternLockGrid} from '../components/PatternLockGrid';
 import {PinConfirmModal} from '../components/PinConfirmModal';
 import {SheetModal} from '../components/SheetModal';
 import {
-  createZandoLogoPngBlob,
-  createZandoLogoSvgBlob,
-  ZandoLogo,
-} from '../components/ZandoLogo';
+  StoreTransferModal,
+  StoreTransferModalState,
+} from '../components/StoreTransferModal';
 import {useStore} from '../context/StoreContext';
 import {
   APP_VERSION,
@@ -41,17 +50,22 @@ import {
   STORES,
 } from '../db/indexedDb';
 import {useOnlineStatus} from '../hooks/useOnlineStatus';
-import {downloadBlobSafely} from '../services/androidShareService';
+import {copyTextSafely, downloadBlobSafely} from '../services/androidShareService';
 import {
   exportFullBackup,
   restoreBackupPayload,
   validateBackupJson,
 } from '../services/backupService';
 import {clearAllCachedUrls} from '../services/mediaService';
+import {requestBrowserNotificationPermission} from '../services/notificationService';
 import {checkServerHealth} from '../services/onlineCatalogService';
-import {decryptBackupText, encryptBackupText} from '../services/securityService';
+import {
+  decryptBackupText,
+  encryptBackupText,
+  getLockMethodLabel,
+} from '../services/securityService';
 import {loadSampleCommerceData} from '../services/seedService';
-import {StoreSlot, ZandoBackupPayload} from '../types/commerce';
+import {LockMethod, StoreSlot, ZandoBackupPayload} from '../types/commerce';
 import {formatBytes, formatDateTime} from '../utils/format';
 
 interface BackupSystemModuleProps {
@@ -62,6 +76,7 @@ export const BackupSystemModule: React.FC<BackupSystemModuleProps> = ({onOpenGui
   const {
     schemaMeta,
     appMode,
+    zandoDeviceId,
     storeSlots,
     activeStoreId,
     securitySettings,
@@ -73,9 +88,9 @@ export const BackupSystemModule: React.FC<BackupSystemModuleProps> = ({onOpenGui
     startRealStore,
     switchStore,
     createNewStore,
-    removeSecondaryStore,
+    removeStoreSlot,
     lockAppNow,
-    enablePinLock,
+    enableSecurityLock,
     disablePinLock,
     verifyCurrentPin,
     updateSecuritySettings,
@@ -106,19 +121,31 @@ export const BackupSystemModule: React.FC<BackupSystemModuleProps> = ({onOpenGui
   const [decryptPassphrase, setDecryptPassphrase] = useState('');
   const [decryptError, setDecryptError] = useState('');
 
-  // Multi-store modal
+  // Multi-store & Transfer state
   const [newStoreModalOpen, setNewStoreModalOpen] = useState(false);
   const [newStoreName, setNewStoreName] = useState('');
   const [newStoreCurrency, setNewStoreCurrency] = useState('FCFA');
   const [creatingStore, setCreatingStore] = useState(false);
   const [deleteStoreTarget, setDeleteStoreTarget] = useState<StoreSlot | null>(null);
+  const [transferModal, setTransferModal] = useState<StoreTransferModalState>(null);
 
-  // PIN config modal
-  const [pinModalMode, setPinModalMode] = useState<'enable' | 'change' | 'disable' | null>(null);
-  const [currentPinInput, setCurrentPinInput] = useState('');
-  const [newPinInput, setNewPinInput] = useState('');
-  const [confirmPinInput, setConfirmPinInput] = useState('');
-  const [pinFormError, setPinFormError] = useState('');
+  // Security Lock modal (PIN / Password / Pattern)
+  const [lockModalOpen, setLockModalOpen] = useState(false);
+  const [lockAction, setLockAction] = useState<'configure' | 'disable'>('configure');
+  const [targetMethod, setTargetMethod] = useState<LockMethod>(
+    securitySettings.lockMethod || 'pin',
+  );
+  const [currentSecret, setCurrentSecret] = useState('');
+  const [currentVerified, setCurrentVerified] = useState(!securitySettings.pinEnabled);
+  const [newSecret, setNewSecret] = useState('');
+  const [confirmSecret, setConfirmSecret] = useState('');
+  const [showNewPwd, setShowNewPwd] = useState(false);
+  const [patternStep, setPatternStep] = useState<'draw' | 'confirm'>('draw');
+  const [firstPattern, setFirstPattern] = useState('');
+  const [lockError, setLockError] = useState('');
+
+  // About & Privacy modal
+  const [aboutModalTab, setAboutModalTab] = useState<'about' | 'privacy' | null>(null);
 
   // Pro settings local form state
   const [proDraft, setProDraft] = useState(proSettings);
@@ -130,6 +157,7 @@ export const BackupSystemModule: React.FC<BackupSystemModuleProps> = ({onOpenGui
     setProDraft(proSettings);
   }, [proSettings]);
 
+  // 100% Hors ligne : aucune requête réseau n'est lancée automatiquement ici !
   const refreshDiagnostics = useCallback(async () => {
     try {
       const info = await getStorageDiagnostics();
@@ -143,20 +171,13 @@ export const BackupSystemModule: React.FC<BackupSystemModuleProps> = ({onOpenGui
         if (reg?.active) {
           setSwStatus('active');
         } else {
-          await navigator.serviceWorker.ready;
-          setSwStatus('active');
+          setSwStatus('pending');
         }
       } catch {
         setSwStatus('pending');
       }
     } else {
       setSwStatus('unsupported');
-    }
-    if (navigator.onLine) {
-      const health = await checkServerHealth();
-      if (health.ok && health.version) {
-        setServerVersion(health.version);
-      }
     }
     setLastRefreshedAt(Date.now());
   }, []);
@@ -179,10 +200,17 @@ export const BackupSystemModule: React.FC<BackupSystemModuleProps> = ({onOpenGui
     }
   };
 
+  // Réseau sollicité UNIQUEMENT quand l'utilisateur clique sur "Mettre à jour l'application"
   const handleCheckAndApplyUpdate = async () => {
     setCheckingUpdate(true);
     setUpdateNote(null);
     try {
+      if (!navigator.onLine) {
+        setUpdateNote('Vous êtes hors ligne : impossible de contacter le serveur de mise à jour.');
+        notify('Connexion Internet requise pour vérifier les mises à jour.', 'error');
+        return;
+      }
+
       let appliedSw = false;
       if ('serviceWorker' in navigator) {
         const reg = await navigator.serviceWorker.getRegistration();
@@ -193,12 +221,6 @@ export const BackupSystemModule: React.FC<BackupSystemModuleProps> = ({onOpenGui
             appliedSw = true;
           }
         }
-      }
-
-      if (!navigator.onLine) {
-        setUpdateNote('Vous êtes hors ligne : impossible de contacter le serveur de mise à jour.');
-        notify('Connexion Internet requise pour vérifier les mises à jour.', 'error');
-        return;
       }
 
       const health = await checkServerHealth();
@@ -230,6 +252,73 @@ export const BackupSystemModule: React.FC<BackupSystemModuleProps> = ({onOpenGui
     } finally {
       setCheckingUpdate(false);
     }
+  };
+
+  const openLockSetupModal = (method: LockMethod, action: 'configure' | 'disable' = 'configure') => {
+    setLockAction(action);
+    setTargetMethod(method);
+    setCurrentSecret('');
+    setCurrentVerified(!securitySettings.pinEnabled);
+    setNewSecret('');
+    setConfirmSecret('');
+    setShowNewPwd(false);
+    setPatternStep('draw');
+    setFirstPattern('');
+    setLockError('');
+    setLockModalOpen(true);
+  };
+
+  const handleVerifyExistingSecret = async (candidate: string) => {
+    setLockError('');
+    const ok = await verifyCurrentPin(candidate);
+    if (!ok) {
+      setLockError(`${getLockMethodLabel(securitySettings.lockMethod)} actuel incorrect.`);
+      return;
+    }
+    if (lockAction === 'disable') {
+      disablePinLock();
+      setLockModalOpen(false);
+      notify('Paramètres sauvegardés. Verrouillage désactivé.', 'info');
+      return;
+    }
+    setCurrentVerified(true);
+    setCurrentSecret('');
+  };
+
+  const handleSaveNewLockSecret = async (secretToSave: string) => {
+    setLockError('');
+    if (targetMethod === 'pin') {
+      if (!/^\d{4,6}$/.test(secretToSave)) {
+        setLockError('Le code PIN doit contenir entre 4 et 6 chiffres.');
+        return;
+      }
+      if (secretToSave !== confirmSecret) {
+        setLockError('Les deux codes PIN ne correspondent pas.');
+        return;
+      }
+    } else if (targetMethod === 'password') {
+      if (secretToSave.length < 4) {
+        setLockError('Le mot de passe doit contenir au moins 4 caractères.');
+        return;
+      }
+      if (secretToSave !== confirmSecret) {
+        setLockError('Les deux mots de passe ne correspondent pas.');
+        return;
+      }
+    } else if (targetMethod === 'pattern') {
+      const pts = secretToSave.split('-').filter(Boolean);
+      if (pts.length < 4) {
+        setLockError('Reliez au moins 4 points pour créer un schéma sûr.');
+        return;
+      }
+    }
+
+    await enableSecurityLock(targetMethod, secretToSave);
+    setLockModalOpen(false);
+    notify(
+      `Paramètres sauvegardés. Mode de verrouillage : ${getLockMethodLabel(targetMethod)}.`,
+      'success',
+    );
   };
 
   const handleExport = async () => {
@@ -364,39 +453,6 @@ export const BackupSystemModule: React.FC<BackupSystemModuleProps> = ({onOpenGui
     }
   };
 
-  const handlePinFormSubmit = async (e: React.FormEvent) => {
-    e.preventDefault();
-    setPinFormError('');
-    if (pinModalMode === 'change' || pinModalMode === 'disable') {
-      const ok = await verifyCurrentPin(currentPinInput);
-      if (!ok) {
-        setPinFormError('Code PIN actuel incorrect.');
-        return;
-      }
-    }
-    if (pinModalMode === 'disable') {
-      disablePinLock();
-      setPinModalMode(null);
-      setCurrentPinInput('');
-      notify('Verrouillage par code PIN désactivé.', 'info');
-      return;
-    }
-    if (!/^\d{4,6}$/.test(newPinInput)) {
-      setPinFormError('Le code PIN doit contenir entre 4 et 6 chiffres.');
-      return;
-    }
-    if (newPinInput !== confirmPinInput) {
-      setPinFormError('Les deux codes PIN ne correspondent pas.');
-      return;
-    }
-    await enablePinLock(newPinInput);
-    setPinModalMode(null);
-    setCurrentPinInput('');
-    setNewPinInput('');
-    setConfirmPinInput('');
-    notify('Code PIN de sécurité enregistré (hachage PBKDF2-SHA256).', 'success');
-  };
-
   const handleResetActiveStoreData = async () => {
     clearAllCachedUrls();
     const storeNames = [
@@ -420,9 +476,12 @@ export const BackupSystemModule: React.FC<BackupSystemModuleProps> = ({onOpenGui
     notify('Les données de la boutique active ont été réinitialisées.', 'info');
   };
 
+  const currentLockMethod = securitySettings.lockMethod || 'pin';
+  const existingLockMethod = securitySettings.lockMethod || 'pin';
+
   return (
     <div className="space-y-6 max-w-4xl">
-      {/* 1. Bouton Activer / Désactiver Mode Démo & Guide */}
+      {/* 1. Mode Démonstration & Guide */}
       <section className="rounded-2xl border border-slate-200 dark:border-slate-800 bg-white dark:bg-slate-900 p-5 space-y-4">
         <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-3">
           <div>
@@ -484,7 +543,7 @@ export const BackupSystemModule: React.FC<BackupSystemModuleProps> = ({onOpenGui
         </div>
       </section>
 
-      {/* 2. Multi-boutiques (jusqu'à 3 boutiques) */}
+      {/* 2. Multi-boutiques, Vente, Achat & Collaboration */}
       <section className="rounded-2xl border border-slate-200 dark:border-slate-800 bg-white dark:bg-slate-900 p-5 space-y-4">
         <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-3">
           <div>
@@ -495,61 +554,123 @@ export const BackupSystemModule: React.FC<BackupSystemModuleProps> = ({onOpenGui
               </span>
             </h2>
             <p className="mt-1 text-xs sm:text-sm text-slate-600 dark:text-slate-400">
-              Ouvrez jusqu’à {MAX_STORES} boutiques indépendantes avec bases IndexedDB séparées (stocks, ventes, clients et catalogues isolés).
+              Gérez jusqu’à {MAX_STORES} boutiques locales, cédez-en une définitivement ou accordez un accès en collaboration.
             </p>
+          </div>
+          <div className="flex flex-wrap gap-2 shrink-0">
+            <button
+              type="button"
+              onClick={() => setTransferModal({mode: 'buy'})}
+              className="inline-flex items-center gap-1.5 min-h-[42px] px-3.5 rounded-xl border border-slate-200 dark:border-slate-700 text-xs sm:text-sm font-semibold hover:bg-slate-50 dark:hover:bg-slate-800 cursor-pointer"
+            >
+              <ArrowLeftRight className="w-4 h-4 text-emerald-600" />
+              <span>Acheter / Rejoindre</span>
+            </button>
+            <button
+              type="button"
+              disabled={storeSlots.length >= MAX_STORES}
+              onClick={() => setNewStoreModalOpen(true)}
+              className="inline-flex items-center justify-center gap-2 min-h-[42px] px-4 rounded-xl bg-emerald-600 hover:bg-emerald-700 text-white text-xs sm:text-sm font-semibold whitespace-nowrap cursor-pointer disabled:opacity-45 disabled:cursor-not-allowed"
+            >
+              <Plus className="w-4 h-4" />
+              <span>
+                {storeSlots.length >= MAX_STORES
+                  ? `Limite (${MAX_STORES}/${MAX_STORES})`
+                  : 'Ouvrir boutique'}
+              </span>
+            </button>
+          </div>
+        </div>
+
+        {/* Device ZANDO ID pill-free banner */}
+        <div className="rounded-xl border border-slate-200 dark:border-slate-800 bg-slate-50/70 dark:bg-slate-950/50 px-3.5 py-2.5 flex flex-wrap items-center justify-between gap-2 text-xs">
+          <div>
+            <span className="text-slate-500 dark:text-slate-400">Votre Identifiant ZANDO : </span>
+            <strong className="font-mono text-slate-900 dark:text-white tracking-wide">
+              {zandoDeviceId}
+            </strong>
           </div>
           <button
             type="button"
-            disabled={storeSlots.length >= MAX_STORES}
-            onClick={() => setNewStoreModalOpen(true)}
-            className="inline-flex items-center justify-center gap-2 min-h-[44px] px-4 py-2 rounded-xl bg-emerald-600 hover:bg-emerald-700 text-white text-xs sm:text-sm font-semibold whitespace-nowrap shrink-0 cursor-pointer disabled:opacity-45 disabled:cursor-not-allowed"
+            onClick={async () => {
+              await copyTextSafely(zandoDeviceId);
+              notify(`Identifiant ${zandoDeviceId} copié.`, 'success');
+            }}
+            className="inline-flex items-center gap-1 text-emerald-700 dark:text-emerald-400 font-semibold hover:underline cursor-pointer"
           >
-            <Plus className="w-4 h-4" />
-            <span>
-              {storeSlots.length >= MAX_STORES
-                ? `Limite atteinte (${MAX_STORES}/${MAX_STORES})`
-                : 'Ouvrir une boutique'}
-            </span>
+            <Copy className="w-3.5 h-3.5" />
+            <span>Copier identifiant</span>
           </button>
         </div>
 
         <div className="divide-y divide-slate-100 dark:divide-slate-800 rounded-xl border border-slate-200 dark:border-slate-800">
           {storeSlots.map((slot, idx) => {
             const isActive = appMode !== 'demo' && slot.id === activeStoreId;
+            const isCollab = slot.role === 'collaborator';
             return (
               <div
                 key={slot.id}
                 className="p-3.5 flex flex-wrap items-center justify-between gap-3"
               >
                 <div className="min-w-0">
-                  <div className="text-sm font-bold text-slate-900 dark:text-white flex items-center gap-2">
+                  <div className="text-sm font-bold text-slate-900 dark:text-white flex flex-wrap items-center gap-2">
                     <span className="truncate">{slot.name}</span>
                     {isActive && (
                       <span className="text-[11px] font-bold text-emerald-700 dark:text-emerald-400">
                         · Active
                       </span>
                     )}
+                    {isCollab && (
+                      <span className="text-[11px] font-semibold text-sky-700 dark:text-sky-400">
+                        · Collaboration ({slot.ownerZandoId})
+                      </span>
+                    )}
                   </div>
                   <div className="text-xs text-slate-500 dark:text-slate-400">
                     Boutique #{idx + 1} · Devise {slot.currency} · {slot.dbName}
+                    {!isCollab && (slot.collaborators?.length ?? 0) > 0
+                      ? ` · ${slot.collaborators!.length} collaborateur(s)`
+                      : ''}
                   </div>
                 </div>
 
-                <div className="flex items-center gap-2 shrink-0">
+                <div className="flex flex-wrap items-center gap-1.5 shrink-0">
                   {!isActive && (
                     <button
                       type="button"
                       onClick={() => switchStore(slot.id)}
-                      className="min-h-[38px] px-3.5 rounded-xl bg-slate-900 dark:bg-white text-white dark:text-slate-900 text-xs font-semibold cursor-pointer"
+                      className="min-h-[36px] px-3 rounded-xl bg-slate-900 dark:bg-white text-white dark:text-slate-900 text-xs font-semibold cursor-pointer"
                     >
                       Basculer
                     </button>
                   )}
-                  {idx > 0 && storeSlots.length > 1 && (
+                  {!isCollab && (
+                    <>
+                      <button
+                        type="button"
+                        onClick={() => setTransferModal({mode: 'collaborate', store: slot})}
+                        className="inline-flex items-center gap-1 min-h-[36px] px-3 rounded-xl border border-slate-200 dark:border-slate-700 text-xs font-semibold hover:bg-slate-50 dark:hover:bg-slate-800 cursor-pointer"
+                        title="Accorder des droits d’utilisation sans céder la boutique"
+                      >
+                        <Users className="w-3.5 h-3.5 text-sky-600" />
+                        <span>Collaboration</span>
+                      </button>
+                      <button
+                        type="button"
+                        onClick={() => setTransferModal({mode: 'sell', store: slot})}
+                        className="inline-flex items-center gap-1 min-h-[36px] px-3 rounded-xl border border-amber-300 dark:border-amber-800 text-amber-800 dark:text-amber-300 text-xs font-semibold hover:bg-amber-50 dark:hover:bg-amber-950/40 cursor-pointer"
+                        title="Vendre cette boutique à un autre utilisateur ZANDO Pro"
+                      >
+                        <ArrowLeftRight className="w-3.5 h-3.5" />
+                        <span>Vendre</span>
+                      </button>
+                    </>
+                  )}
+                  {storeSlots.length > 1 && (
                     <button
                       type="button"
                       onClick={() => setDeleteStoreTarget(slot)}
-                      className="min-h-[38px] min-w-[38px] flex items-center justify-center rounded-xl text-rose-600 hover:bg-rose-50 dark:hover:bg-rose-950/40 cursor-pointer"
+                      className="min-h-[36px] min-w-[36px] flex items-center justify-center rounded-xl text-rose-600 hover:bg-rose-50 dark:hover:bg-rose-950/40 cursor-pointer"
                       aria-label={`Supprimer ${slot.name}`}
                       title="Supprimer cette boutique"
                     >
@@ -563,16 +684,16 @@ export const BackupSystemModule: React.FC<BackupSystemModuleProps> = ({onOpenGui
         </div>
       </section>
 
-      {/* 3. Sécurité & Protection des données */}
+      {/* 3. Sécurité, Verrouillage (PIN, Mot de passe, Schéma) & Confidentialité */}
       <section className="rounded-2xl border border-slate-200 dark:border-slate-800 bg-white dark:bg-slate-900 p-5 space-y-5">
         <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-3">
           <div>
             <h2 className="text-base font-bold text-slate-900 dark:text-white flex items-center gap-2">
               <ShieldCheck className="w-4 h-4 text-emerald-600" />
-              <span>Sécurité, Verrouillage & Confidentialité</span>
+              <span>Sécurité, Verrouillage & Notifications</span>
             </h2>
             <p className="mt-1 text-xs sm:text-sm text-slate-600 dark:text-slate-400">
-              Protégez l’accès à votre caisse et vos chiffres sensibles par code PIN (hachage PBKDF2-SHA256 salé) et sauvegarde chiffrée AES-256-GCM.
+              Choisissez votre méthode de verrouillage (Code PIN, Mot de passe ou Schéma) et le délai de verrouillage automatique dès 15 secondes.
             </p>
           </div>
           {securitySettings.pinEnabled && (
@@ -587,13 +708,13 @@ export const BackupSystemModule: React.FC<BackupSystemModuleProps> = ({onOpenGui
           )}
         </div>
 
-        {/* PIN Controls */}
-        <div className="rounded-xl border border-slate-200 dark:border-slate-800 bg-slate-50/70 dark:bg-slate-950/50 p-4 flex flex-col sm:flex-row sm:items-center justify-between gap-3">
-          <div className="space-y-0.5">
+        {/* Mode de verrouillage : Code PIN / Mot de passe / Schéma */}
+        <div className="rounded-xl border border-slate-200 dark:border-slate-800 bg-slate-50/70 dark:bg-slate-950/50 p-4 space-y-3">
+          <div className="flex flex-wrap items-center justify-between gap-2">
             <div className="text-sm font-bold text-slate-900 dark:text-white flex items-center gap-2">
               <KeyRound className="w-4 h-4 text-emerald-600" />
               <span>
-                Code PIN d’accès :{' '}
+                Mode de verrouillage :{' '}
                 <span
                   className={
                     securitySettings.pinEnabled
@@ -601,57 +722,80 @@ export const BackupSystemModule: React.FC<BackupSystemModuleProps> = ({onOpenGui
                       : 'text-slate-500'
                   }
                 >
-                  {securitySettings.pinEnabled ? 'Activé' : 'Désactivé'}
+                  {securitySettings.pinEnabled
+                    ? `${getLockMethodLabel(currentLockMethod)} actif`
+                    : 'Désactivé'}
                 </span>
               </span>
             </div>
-            <p className="text-xs text-slate-500 dark:text-slate-400">
-              Verrouillage temporaire de 30s après 5 tentatives erronées.
-            </p>
-          </div>
-          <div className="flex flex-wrap gap-2 shrink-0">
-            {!securitySettings.pinEnabled ? (
+            {securitySettings.pinEnabled && (
               <button
                 type="button"
-                onClick={() => {
-                  setPinFormError('');
-                  setNewPinInput('');
-                  setConfirmPinInput('');
-                  setPinModalMode('enable');
-                }}
-                className="min-h-[40px] px-4 rounded-xl bg-emerald-600 hover:bg-emerald-700 text-white text-xs font-semibold cursor-pointer"
+                onClick={() => openLockSetupModal(currentLockMethod, 'disable')}
+                className="text-xs font-semibold text-rose-600 hover:underline cursor-pointer"
               >
-                Configurer un code PIN
+                Désactiver le verrouillage
               </button>
-            ) : (
-              <>
-                <button
-                  type="button"
-                  onClick={() => {
-                    setPinFormError('');
-                    setCurrentPinInput('');
-                    setNewPinInput('');
-                    setConfirmPinInput('');
-                    setPinModalMode('change');
-                  }}
-                  className="min-h-[40px] px-3.5 rounded-xl border border-slate-200 dark:border-slate-700 bg-white dark:bg-slate-900 text-xs font-semibold cursor-pointer"
-                >
-                  Modifier PIN
-                </button>
-                <button
-                  type="button"
-                  onClick={() => {
-                    setPinFormError('');
-                    setCurrentPinInput('');
-                    setPinModalMode('disable');
-                  }}
-                  className="min-h-[40px] px-3.5 rounded-xl border border-rose-200 dark:border-rose-900 text-rose-600 text-xs font-semibold cursor-pointer"
-                >
-                  Désactiver
-                </button>
-              </>
             )}
           </div>
+
+          <div className="grid grid-cols-1 sm:grid-cols-3 gap-2.5">
+            {(
+              [
+                {
+                  id: 'pin' as LockMethod,
+                  label: 'Code PIN',
+                  desc: '4 à 6 chiffres rapides',
+                  icon: KeyRound,
+                },
+                {
+                  id: 'password' as LockMethod,
+                  label: 'Mot de passe',
+                  desc: 'Lettres, chiffres & symboles',
+                  icon: Lock,
+                },
+                {
+                  id: 'pattern' as LockMethod,
+                  label: 'Schéma',
+                  desc: 'Tracé tactile sur grille 3×3',
+                  icon: Grid3X3,
+                },
+              ] as const
+            ).map((opt) => {
+              const Icon = opt.icon;
+              const isSelected = securitySettings.pinEnabled && currentLockMethod === opt.id;
+              return (
+                <button
+                  key={opt.id}
+                  type="button"
+                  onClick={() => openLockSetupModal(opt.id, 'configure')}
+                  className={`p-3 rounded-xl border text-left transition-colors cursor-pointer ${
+                    isSelected
+                      ? 'border-emerald-600 bg-emerald-50 dark:bg-emerald-950/40'
+                      : 'border-slate-200 dark:border-slate-800 bg-white dark:bg-slate-900 hover:bg-slate-50 dark:hover:bg-slate-800'
+                  }`}
+                >
+                  <div className="flex items-center justify-between gap-2">
+                    <span className="text-xs font-bold text-slate-900 dark:text-white flex items-center gap-1.5">
+                      <Icon className="w-4 h-4 text-emerald-600" />
+                      <span>{opt.label}</span>
+                    </span>
+                    {isSelected && (
+                      <span className="text-[10px] font-bold text-emerald-700 dark:text-emerald-400">
+                        Actif
+                      </span>
+                    )}
+                  </div>
+                  <div className="text-[11px] text-slate-500 dark:text-slate-400 mt-1">
+                    {opt.desc}
+                  </div>
+                </button>
+              );
+            })}
+          </div>
+          <p className="text-[11px] text-slate-500 dark:text-slate-400">
+            Cliquez sur Code PIN, Mot de passe ou Schéma pour le configurer immédiatement. Verrouillage temporaire de 30s après 5 tentatives erronées.
+          </p>
         </div>
 
         {/* Security Options Grid */}
@@ -661,16 +805,19 @@ export const BackupSystemModule: React.FC<BackupSystemModuleProps> = ({onOpenGui
               Verrouillage auto après inactivité
             </label>
             <ModernSelect
-              value={String(securitySettings.autoLockMinutes)}
-              onChange={(val) =>
-                updateSecuritySettings({autoLockMinutes: Number(val) as 0 | 1 | 5 | 15 | 30})
-              }
+              value={String(securitySettings.autoLockSeconds)}
+              onChange={(val) => {
+                updateSecuritySettings({autoLockSeconds: Number(val)});
+                notify('Paramètres sauvegardés.', 'success');
+              }}
               options={[
                 {value: '0', label: 'Jamais'},
-                {value: '1', label: 'Après 1 minute'},
-                {value: '5', label: 'Après 5 minutes'},
-                {value: '15', label: 'Après 15 minutes'},
-                {value: '30', label: 'Après 30 minutes'},
+                {value: '15', label: 'Après 15 secondes'},
+                {value: '30', label: 'Après 30 secondes'},
+                {value: '60', label: 'Après 1 minute'},
+                {value: '300', label: 'Après 5 minutes'},
+                {value: '900', label: 'Après 15 minutes'},
+                {value: '1800', label: 'Après 30 minutes'},
               ]}
             />
           </div>
@@ -681,9 +828,10 @@ export const BackupSystemModule: React.FC<BackupSystemModuleProps> = ({onOpenGui
             </label>
             <ModernSelect
               value={String(securitySettings.backupReminderDays)}
-              onChange={(val) =>
-                updateSecuritySettings({backupReminderDays: Number(val) as 0 | 7 | 14 | 30})
-              }
+              onChange={(val) => {
+                updateSecuritySettings({backupReminderDays: Number(val) as 0 | 7 | 14 | 30});
+                notify('Paramètres sauvegardés.', 'success');
+              }}
               options={[
                 {value: '0', label: 'Désactivé'},
                 {value: '7', label: 'Tous les 7 jours'},
@@ -710,7 +858,10 @@ export const BackupSystemModule: React.FC<BackupSystemModuleProps> = ({onOpenGui
             <input
               type="checkbox"
               checked={securitySettings.privacyModeEnabled}
-              onChange={(e) => updateSecuritySettings({privacyModeEnabled: e.target.checked})}
+              onChange={(e) => {
+                updateSecuritySettings({privacyModeEnabled: e.target.checked});
+                notify('Paramètres sauvegardés.', 'success');
+              }}
               className="w-5 h-5 accent-emerald-600 shrink-0"
             />
           </label>
@@ -720,22 +871,64 @@ export const BackupSystemModule: React.FC<BackupSystemModuleProps> = ({onOpenGui
               <Lock className="w-4 h-4 text-slate-500 shrink-0" />
               <div className="text-xs">
                 <div className="font-bold text-slate-900 dark:text-white">
-                  Exiger le code PIN pour les actions sensibles
+                  Exiger le verrouillage pour les actions sensibles
                 </div>
                 <div className="text-slate-500">
-                  Protège la suppression de boutique, la restauration complète et la réinitialisation.
+                  Protège la suppression ou vente de boutique, la restauration complète et la réinitialisation.
                 </div>
               </div>
             </div>
             <input
               type="checkbox"
               checked={securitySettings.requirePinForSensitiveActions}
-              onChange={(e) =>
-                updateSecuritySettings({requirePinForSensitiveActions: e.target.checked})
-              }
+              onChange={(e) => {
+                updateSecuritySettings({requirePinForSensitiveActions: e.target.checked});
+                notify('Paramètres sauvegardés.', 'success');
+              }}
               className="w-5 h-5 accent-emerald-600 shrink-0"
             />
           </label>
+
+          <label className="flex items-center justify-between gap-3 p-3.5 rounded-xl border border-slate-200 dark:border-slate-800 cursor-pointer">
+            <div className="flex items-center gap-2.5 min-w-0">
+              <BellRing className="w-4 h-4 text-slate-500 shrink-0" />
+              <div className="text-xs">
+                <div className="font-bold text-slate-900 dark:text-white">
+                  Notifications système hors ligne (stock, crédits, transferts)
+                </div>
+                <div className="text-slate-500">
+                  En plus du Centre de notifications intégré, affiche les alertes sur l’appareil si autorisé.
+                </div>
+              </div>
+            </div>
+            <input
+              type="checkbox"
+              checked={Boolean(securitySettings.browserNotificationsEnabled)}
+              onChange={async (e) => {
+                const want = e.target.checked;
+                if (want) {
+                  await requestBrowserNotificationPermission();
+                }
+                updateSecuritySettings({browserNotificationsEnabled: want});
+                notify('Paramètres sauvegardés.', 'success');
+              }}
+              className="w-5 h-5 accent-emerald-600 shrink-0"
+            />
+          </label>
+        </div>
+
+        <div className="flex justify-end">
+          <button
+            type="button"
+            onClick={() => {
+              updateSecuritySettings({});
+              notify('Paramètres sauvegardés.', 'success');
+            }}
+            className="inline-flex items-center gap-1.5 min-h-[40px] px-4 rounded-xl bg-slate-900 dark:bg-white text-white dark:text-slate-900 text-xs font-semibold cursor-pointer"
+          >
+            <Save className="w-3.5 h-3.5" />
+            <span>Enregistrer la sécurité</span>
+          </button>
         </div>
 
         {/* Security Audit Log */}
@@ -862,11 +1055,12 @@ export const BackupSystemModule: React.FC<BackupSystemModuleProps> = ({onOpenGui
             type="button"
             onClick={() => {
               updateProSettings(proDraft);
-              notify('Paramètres commerciaux enregistrés.', 'success');
+              notify('Paramètres sauvegardés.', 'success');
             }}
-            className="min-h-[42px] px-5 rounded-xl bg-slate-900 dark:bg-white text-white dark:text-slate-900 text-xs sm:text-sm font-semibold cursor-pointer"
+            className="inline-flex items-center gap-1.5 min-h-[42px] px-5 rounded-xl bg-slate-900 dark:bg-white text-white dark:text-slate-900 text-xs sm:text-sm font-semibold cursor-pointer"
           >
-            Enregistrer les paramètres Pro
+            <Save className="w-4 h-4" />
+            <span>Enregistrer les paramètres</span>
           </button>
         </div>
       </section>
@@ -949,7 +1143,7 @@ export const BackupSystemModule: React.FC<BackupSystemModuleProps> = ({onOpenGui
         </div>
       </section>
 
-      {/* 6. Stockage local, Actualisation & Mise à jour de l'application (SANS bilan boutique) */}
+      {/* 6. Stockage local, Actualisation & Mise à jour (Sans bilan boutique & sans appel réseau automatique) */}
       <section className="rounded-2xl border border-slate-200 dark:border-slate-800 bg-white dark:bg-slate-900 p-5 space-y-4">
         <div className="flex flex-wrap items-center justify-between gap-2">
           <div>
@@ -1011,7 +1205,7 @@ export const BackupSystemModule: React.FC<BackupSystemModuleProps> = ({onOpenGui
                   ? 'Actif et prêt hors ligne'
                   : swStatus === 'unsupported'
                     ? 'Non supporté par ce WebView'
-                    : 'Initialisation...'}
+                    : 'Prêt localement'}
               </span>
             </div>
           </div>
@@ -1045,57 +1239,36 @@ export const BackupSystemModule: React.FC<BackupSystemModuleProps> = ({onOpenGui
         </div>
       </section>
 
-      {/* 7. Official ZANDO Pro Logo Export */}
-      <section className="rounded-2xl border border-slate-200 dark:border-slate-800 bg-white dark:bg-slate-900 p-5 space-y-4">
-        <div className="space-y-1">
-          <ZandoLogo />
-          <p className="text-xs sm:text-sm text-slate-600 dark:text-slate-400 pt-1">
-            Téléchargez directement le logo officiel de <strong>ZANDO Pro</strong> pour vos visuels ou documents.
-          </p>
-        </div>
-        <div className="flex flex-wrap gap-2.5">
-          <button
-            type="button"
-            onClick={async () => {
-              try {
-                const pngBlob = await createZandoLogoPngBlob(1024);
-                await downloadBlobSafely(pngBlob, 'zando-pro-logo-1024.png');
-                notify('Logo PNG (1024×1024) téléchargé.', 'success');
-              } catch (err) {
-                notify(err instanceof Error ? err.message : 'Erreur export PNG.', 'error');
-              }
-            }}
-            className="inline-flex items-center gap-2 min-h-[42px] px-4 py-2 rounded-xl bg-slate-900 dark:bg-white text-white dark:text-slate-900 text-xs font-semibold cursor-pointer"
-          >
-            <Download className="w-4 h-4" />
-            <span>Logo PNG (1024×1024)</span>
-          </button>
-
-          <button
-            type="button"
-            onClick={async () => {
-              const svgBlob = createZandoLogoSvgBlob('icon');
-              await downloadBlobSafely(svgBlob, 'zando-pro-icone.svg');
-              notify('Icône SVG téléchargée.', 'success');
-            }}
-            className="inline-flex items-center gap-2 min-h-[42px] px-4 py-2 rounded-xl border border-slate-200 dark:border-slate-700 text-xs font-semibold hover:bg-slate-50 dark:hover:bg-slate-800 cursor-pointer"
-          >
-            <Download className="w-4 h-4" />
-            <span>Icône (.svg)</span>
-          </button>
-
-          <button
-            type="button"
-            onClick={async () => {
-              const svgBlob = createZandoLogoSvgBlob('wordmark');
-              await downloadBlobSafely(svgBlob, 'zando-pro-logo-complet.svg');
-              notify('Logo complet « ZANDO Pro » (.svg) téléchargé.', 'success');
-            }}
-            className="inline-flex items-center gap-2 min-h-[42px] px-4 py-2 rounded-xl border border-slate-200 dark:border-slate-700 text-xs font-semibold hover:bg-slate-50 dark:hover:bg-slate-800 cursor-pointer"
-          >
-            <Download className="w-4 h-4" />
-            <span>Logo complet (.svg)</span>
-          </button>
+      {/* 7. À propos & Confidentialité (sans téléchargement de logo ZANDO Pro) */}
+      <section className="rounded-2xl border border-slate-200 dark:border-slate-800 bg-white dark:bg-slate-900 p-5 space-y-3">
+        <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-3">
+          <div>
+            <h2 className="text-base font-bold text-slate-900 dark:text-white flex items-center gap-2">
+              <Info className="w-4 h-4 text-emerald-600" />
+              <span>À propos & Confidentialité</span>
+            </h2>
+            <p className="mt-1 text-xs sm:text-sm text-slate-600 dark:text-slate-400">
+              ZANDO Pro v{APP_VERSION} fonctionne sans connexion dès l’installation. Vos données restent strictement privées sur cet appareil.
+            </p>
+          </div>
+          <div className="flex flex-wrap gap-2 shrink-0">
+            <button
+              type="button"
+              onClick={() => setAboutModalTab('about')}
+              className="inline-flex items-center gap-1.5 min-h-[40px] px-3.5 rounded-xl border border-slate-200 dark:border-slate-700 text-xs font-semibold hover:bg-slate-50 dark:hover:bg-slate-800 cursor-pointer"
+            >
+              <Info className="w-3.5 h-3.5 text-emerald-600" />
+              <span>À propos</span>
+            </button>
+            <button
+              type="button"
+              onClick={() => setAboutModalTab('privacy')}
+              className="inline-flex items-center gap-1.5 min-h-[40px] px-3.5 rounded-xl bg-slate-900 dark:bg-white text-white dark:text-slate-900 text-xs font-semibold cursor-pointer"
+            >
+              <ShieldCheck className="w-3.5 h-3.5" />
+              <span>Confidentialité</span>
+            </button>
+          </div>
         </div>
       </section>
 
@@ -1148,87 +1321,255 @@ export const BackupSystemModule: React.FC<BackupSystemModuleProps> = ({onOpenGui
         </form>
       </SheetModal>
 
-      {/* Modal: PIN Enable / Change / Disable */}
+      {/* Modal: Configurer / Modifier / Désactiver Code PIN, Mot de passe ou Schéma */}
       <SheetModal
-        open={!!pinModalMode}
-        onClose={() => setPinModalMode(null)}
+        open={lockModalOpen}
+        onClose={() => setLockModalOpen(false)}
         title={
-          pinModalMode === 'enable'
-            ? 'Configurer le code PIN'
-            : pinModalMode === 'change'
-              ? 'Modifier le code PIN'
-              : 'Désactiver le code PIN'
+          lockAction === 'disable'
+            ? `Désactiver le verrouillage (${getLockMethodLabel(existingLockMethod)})`
+            : `Configurer le verrouillage : ${getLockMethodLabel(targetMethod)}`
         }
         maxWidthClass="max-w-md"
       >
-        <form onSubmit={handlePinFormSubmit} className="space-y-4">
-          {(pinModalMode === 'change' || pinModalMode === 'disable') && (
-            <div>
-              <label className="block text-xs font-semibold mb-1">Code PIN actuel *</label>
-              <input
-                type="password"
-                inputMode="numeric"
-                required
-                value={currentPinInput}
-                onChange={(e) => setCurrentPinInput(e.target.value.replace(/\D/g, '').slice(0, 6))}
-                placeholder="4 à 6 chiffres"
-                className="w-full min-h-[44px] px-3.5 rounded-xl border border-slate-200 dark:border-slate-700 bg-white dark:bg-slate-950 text-sm tracking-widest"
-              />
+        <div className="space-y-4">
+          {!currentVerified ? (
+            <div className="space-y-3">
+              <p className="text-xs text-slate-600 dark:text-slate-300 leading-relaxed">
+                Pour modifier ou désactiver votre sécurité, confirmez d’abord votre{' '}
+                <strong>{getLockMethodLabel(existingLockMethod).toLowerCase()}</strong> actuel :
+              </p>
+
+              {existingLockMethod === 'pattern' ? (
+                <PatternLockGrid
+                  errorState={Boolean(lockError)}
+                  helperText="Dessinez votre schéma actuel"
+                  onComplete={(pat) => handleVerifyExistingSecret(pat)}
+                />
+              ) : (
+                <form
+                  onSubmit={(e) => {
+                    e.preventDefault();
+                    handleVerifyExistingSecret(currentSecret);
+                  }}
+                  className="space-y-3"
+                >
+                  <input
+                    type="password"
+                    inputMode={existingLockMethod === 'pin' ? 'numeric' : undefined}
+                    required
+                    autoFocus
+                    value={currentSecret}
+                    onChange={(e) => {
+                      const val =
+                        existingLockMethod === 'pin'
+                          ? e.target.value.replace(/\D/g, '').slice(0, 6)
+                          : e.target.value;
+                      setCurrentSecret(val);
+                      setLockError('');
+                    }}
+                    placeholder={
+                      existingLockMethod === 'pin'
+                        ? 'Code PIN actuel (4 à 6 chiffres)'
+                        : 'Mot de passe actuel'
+                    }
+                    className="w-full min-h-[44px] px-3.5 rounded-xl border border-slate-200 dark:border-slate-700 bg-white dark:bg-slate-950 text-sm"
+                  />
+                  <div className="flex justify-end gap-2">
+                    <button
+                      type="button"
+                      onClick={() => setLockModalOpen(false)}
+                      className="min-h-[42px] px-4 rounded-xl border border-slate-200 dark:border-slate-700 text-xs font-semibold cursor-pointer"
+                    >
+                      Annuler
+                    </button>
+                    <button
+                      type="submit"
+                      className="min-h-[42px] px-4 rounded-xl bg-slate-900 dark:bg-white text-white dark:text-slate-900 text-xs font-semibold cursor-pointer"
+                    >
+                      Continuer
+                    </button>
+                  </div>
+                </form>
+              )}
+              {lockError && <p className="text-xs font-semibold text-rose-600">{lockError}</p>}
             </div>
-          )}
-          {pinModalMode !== 'disable' && (
-            <>
+          ) : targetMethod === 'pattern' ? (
+            <div className="space-y-3.5">
+              <div className="rounded-xl border border-emerald-200 dark:border-emerald-900/60 bg-emerald-50/70 dark:bg-emerald-950/30 p-3 text-xs text-emerald-900 dark:text-emerald-200">
+                {patternStep === 'draw'
+                  ? 'Étape 1/2 : Dessinez un nouveau schéma en reliant au moins 4 points sur la grille.'
+                  : 'Étape 2/2 : Dessinez exactement le même schéma une seconde fois pour le confirmer.'}
+              </div>
+
+              <PatternLockGrid
+                key={patternStep}
+                errorState={Boolean(lockError)}
+                helperText={
+                  patternStep === 'draw'
+                    ? 'Reliez au moins 4 points'
+                    : 'Confirmez votre schéma'
+                }
+                onComplete={(pat) => {
+                  setLockError('');
+                  const pts = pat.split('-').filter(Boolean);
+                  if (pts.length < 4) {
+                    setLockError('Reliez au moins 4 points sur la grille.');
+                    return;
+                  }
+                  if (patternStep === 'draw') {
+                    setFirstPattern(pat);
+                    setPatternStep('confirm');
+                  } else {
+                    if (pat !== firstPattern) {
+                      setLockError('Les deux schémas ne correspondent pas. Recommencez.');
+                      setFirstPattern('');
+                      setPatternStep('draw');
+                      return;
+                    }
+                    setConfirmSecret(pat);
+                    setNewSecret(pat);
+                  }
+                }}
+              />
+
+              {patternStep === 'confirm' && firstPattern && newSecret === firstPattern && (
+                <div className="text-center text-xs font-bold text-emerald-600">
+                  Schéma confirmé ! Enregistrez votre mode de verrouillage.
+                </div>
+              )}
+
+              {lockError && (
+                <p className="text-center text-xs font-semibold text-rose-600">{lockError}</p>
+              )}
+
+              <div className="flex justify-between items-center gap-2 pt-1">
+                {patternStep === 'confirm' ? (
+                  <button
+                    type="button"
+                    onClick={() => {
+                      setPatternStep('draw');
+                      setFirstPattern('');
+                      setNewSecret('');
+                      setConfirmSecret('');
+                      setLockError('');
+                    }}
+                    className="text-xs font-semibold text-slate-500 hover:underline cursor-pointer"
+                  >
+                    Recommencer le tracé
+                  </button>
+                ) : (
+                  <span />
+                )}
+                <div className="flex gap-2">
+                  <button
+                    type="button"
+                    onClick={() => setLockModalOpen(false)}
+                    className="min-h-[42px] px-4 rounded-xl border border-slate-200 dark:border-slate-700 text-xs font-semibold cursor-pointer"
+                  >
+                    Annuler
+                  </button>
+                  <button
+                    type="button"
+                    disabled={!newSecret || newSecret !== firstPattern}
+                    onClick={() => handleSaveNewLockSecret(newSecret)}
+                    className="min-h-[42px] px-4 rounded-xl bg-emerald-600 hover:bg-emerald-700 text-white text-xs font-semibold cursor-pointer disabled:opacity-45"
+                  >
+                    Enregistrer ce verrouillage
+                  </button>
+                </div>
+              </div>
+            </div>
+          ) : (
+            <form
+              onSubmit={(e) => {
+                e.preventDefault();
+                handleSaveNewLockSecret(newSecret);
+              }}
+              className="space-y-4"
+            >
               <div>
                 <label className="block text-xs font-semibold mb-1">
-                  Nouveau code PIN (4 à 6 chiffres) *
+                  {targetMethod === 'pin'
+                    ? 'Nouveau code PIN (4 à 6 chiffres) *'
+                    : 'Nouveau mot de passe (4 caractères min.) *'}
                 </label>
-                <input
-                  type="password"
-                  inputMode="numeric"
-                  required
-                  value={newPinInput}
-                  onChange={(e) => setNewPinInput(e.target.value.replace(/\D/g, '').slice(0, 6))}
-                  placeholder="Ex : 2580"
-                  className="w-full min-h-[44px] px-3.5 rounded-xl border border-slate-200 dark:border-slate-700 bg-white dark:bg-slate-950 text-sm tracking-widest"
-                />
+                <div className="relative">
+                  <input
+                    type={targetMethod === 'password' && showNewPwd ? 'text' : 'password'}
+                    inputMode={targetMethod === 'pin' ? 'numeric' : undefined}
+                    required
+                    autoFocus
+                    value={newSecret}
+                    onChange={(e) => {
+                      const val =
+                        targetMethod === 'pin'
+                          ? e.target.value.replace(/\D/g, '').slice(0, 6)
+                          : e.target.value;
+                      setNewSecret(val);
+                      setLockError('');
+                    }}
+                    placeholder={
+                      targetMethod === 'pin' ? 'Ex : 2580' : 'Choisissez un mot de passe'
+                    }
+                    className="w-full min-h-[44px] pl-3.5 pr-10 rounded-xl border border-slate-200 dark:border-slate-700 bg-white dark:bg-slate-950 text-sm"
+                  />
+                  {targetMethod === 'password' && (
+                    <button
+                      type="button"
+                      onClick={() => setShowNewPwd((v) => !v)}
+                      className="absolute right-2 top-1/2 -translate-y-1/2 w-8 h-8 flex items-center justify-center text-slate-400 cursor-pointer"
+                    >
+                      {showNewPwd ? <EyeOff className="w-4 h-4" /> : <Eye className="w-4 h-4" />}
+                    </button>
+                  )}
+                </div>
               </div>
+
               <div>
                 <label className="block text-xs font-semibold mb-1">
-                  Confirmer le code PIN *
+                  {targetMethod === 'pin' ? 'Confirmer le code PIN *' : 'Confirmer le mot de passe *'}
                 </label>
                 <input
-                  type="password"
-                  inputMode="numeric"
+                  type={targetMethod === 'password' && showNewPwd ? 'text' : 'password'}
+                  inputMode={targetMethod === 'pin' ? 'numeric' : undefined}
                   required
-                  value={confirmPinInput}
-                  onChange={(e) => setConfirmPinInput(e.target.value.replace(/\D/g, '').slice(0, 6))}
-                  placeholder="Répétez le code PIN"
-                  className="w-full min-h-[44px] px-3.5 rounded-xl border border-slate-200 dark:border-slate-700 bg-white dark:bg-slate-950 text-sm tracking-widest"
+                  value={confirmSecret}
+                  onChange={(e) => {
+                    const val =
+                      targetMethod === 'pin'
+                        ? e.target.value.replace(/\D/g, '').slice(0, 6)
+                        : e.target.value;
+                    setConfirmSecret(val);
+                    setLockError('');
+                  }}
+                  placeholder={
+                    targetMethod === 'pin' ? 'Répétez le code PIN' : 'Répétez le mot de passe'
+                  }
+                  className="w-full min-h-[44px] px-3.5 rounded-xl border border-slate-200 dark:border-slate-700 bg-white dark:bg-slate-950 text-sm"
                 />
               </div>
-            </>
+
+              {lockError && <p className="text-xs font-semibold text-rose-600">{lockError}</p>}
+
+              <div className="flex gap-3 justify-end">
+                <button
+                  type="button"
+                  onClick={() => setLockModalOpen(false)}
+                  className="min-h-[44px] px-4 rounded-xl border border-slate-200 dark:border-slate-700 text-sm font-semibold cursor-pointer"
+                >
+                  Annuler
+                </button>
+                <button
+                  type="submit"
+                  className="min-h-[44px] px-5 rounded-xl bg-emerald-600 hover:bg-emerald-700 text-white text-sm font-semibold cursor-pointer"
+                >
+                  Enregistrer
+                </button>
+              </div>
+            </form>
           )}
-          {pinFormError && <p className="text-xs font-semibold text-rose-600">{pinFormError}</p>}
-          <div className="flex gap-3 justify-end">
-            <button
-              type="button"
-              onClick={() => setPinModalMode(null)}
-              className="min-h-[44px] px-4 rounded-xl border border-slate-200 dark:border-slate-700 text-sm font-semibold cursor-pointer"
-            >
-              Annuler
-            </button>
-            <button
-              type="submit"
-              className={`min-h-[44px] px-5 rounded-xl text-white text-sm font-semibold cursor-pointer ${
-                pinModalMode === 'disable'
-                  ? 'bg-rose-600 hover:bg-rose-700'
-                  : 'bg-emerald-600 hover:bg-emerald-700'
-              }`}
-            >
-              Valider
-            </button>
-          </div>
-        </form>
+        </div>
       </SheetModal>
 
       {/* Modal: Export Sauvegarde Chiffrée AES-256-GCM */}
@@ -1409,12 +1750,12 @@ export const BackupSystemModule: React.FC<BackupSystemModuleProps> = ({onOpenGui
         open={!!deleteStoreTarget}
         onClose={() => setDeleteStoreTarget(null)}
         title={`Supprimer « ${deleteStoreTarget?.name ?? ''} » ?`}
-        description="Cette opération supprime définitivement la base IndexedDB de cette boutique secondaire (produits, ventes, clients et catalogues associés)."
+        description="Cette opération supprime définitivement la base IndexedDB de cette boutique sur cet appareil (produits, ventes, clients et catalogues associés)."
         confirmLabel="Supprimer la boutique"
         danger
         onConfirm={async () => {
           if (deleteStoreTarget) {
-            await removeSecondaryStore(deleteStoreTarget.id);
+            await removeStoreSlot(deleteStoreTarget.id);
             await refreshDiagnostics();
           }
         }}
@@ -1429,6 +1770,21 @@ export const BackupSystemModule: React.FC<BackupSystemModuleProps> = ({onOpenGui
         confirmLabel="Effacer les données"
         danger
         onConfirm={handleResetActiveStoreData}
+      />
+
+      <StoreTransferModal
+        state={transferModal}
+        onClose={() => {
+          setTransferModal(null);
+          refreshDiagnostics();
+        }}
+      />
+
+      <AboutPrivacyModal
+        open={aboutModalTab !== null}
+        initialTab={aboutModalTab || 'about'}
+        zandoDeviceId={zandoDeviceId}
+        onClose={() => setAboutModalTab(null)}
       />
     </div>
   );

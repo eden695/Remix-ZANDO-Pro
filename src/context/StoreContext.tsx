@@ -1,4 +1,4 @@
-import React, {createContext, useCallback, useContext, useEffect, useRef, useState} from 'react';
+import React, {createContext, useCallback, useContext, useEffect, useMemo, useRef, useState} from 'react';
 import {
   bulkPutProducts,
   clearStore,
@@ -13,23 +13,36 @@ import {
   getActiveStoreSlot,
   getStoredAppMode,
   getStoreSlots,
+  isStoreSlotEmpty,
   loadAllDomainData,
+  markSlotAsCollaborator,
+  MAX_STORES,
   putRecord,
-  REAL_DB_NAME,
   recordCreditLedgerEntry,
   recordSaleWithStockDeduction,
   setActiveStoreId,
   setStoredAppMode,
   STORES,
+  updateStoreCollaborators,
   updateStoreSlotMeta,
 } from '../db/indexedDb';
 import {answerCommercialQuestion} from '../services/localAssistantService';
 import {clearAllCachedUrls, deleteMediaBlob} from '../services/mediaService';
 import {
+  appendLocalNotification,
+  buildDynamicStoreAlerts,
+  getReadDynamicIds,
+  getStoredNotifications,
+  saveReadDynamicIds,
+  saveStoredNotifications,
+} from '../services/notificationService';
+import {
   appendSecurityAudit,
   clearPinCooldown,
   clearSecurityAuditLog,
   getLockCooldownState,
+  getLockMethodLabel,
+  getOrCreateZandoDeviceId,
   getProAppSettings,
   getSecurityAuditLog,
   getSecuritySettings,
@@ -42,12 +55,22 @@ import {
 } from '../services/securityService';
 import {seedDemoDatabase} from '../services/seedService';
 import {
+  buildStoreTransferPackage,
+  decryptStoreTransferEnvelope,
+  DEFAULT_OWNER_PERMISSIONS,
+  parseTransferInput,
+  restoreBackupPayloadToDatabase,
+} from '../services/storeTransferService';
+import {
   AppMode,
+  AppNotification,
   AppSecuritySettings,
   AssistantMessage,
+  CollaboratorPresetRole,
   CreditTransaction,
   Customer,
   Expense,
+  LockMethod,
   Order,
   ProAppSettings,
   Product,
@@ -56,10 +79,13 @@ import {
   SavedCatalog,
   SchemaMeta,
   SecurityAuditEntry,
+  StoreCollaborator,
+  StorePermissions,
   StoreProfile,
   StoreSlot,
+  StoreTransferEnvelope,
 } from '../types/commerce';
-import {generateId, getContrastTextColor} from '../utils/format';
+import {formatMoney, generateId, getContrastTextColor} from '../utils/format';
 
 export interface ToastMessage {
   id: string;
@@ -67,13 +93,23 @@ export interface ToastMessage {
   tone: 'success' | 'info' | 'error';
 }
 
+export interface TransferPackageResult {
+  envelope: StoreTransferEnvelope;
+  blob: Blob;
+  filename: string;
+  transferCode: string;
+}
+
 interface StoreContextValue {
   loading: boolean;
   error: string | null;
   appMode: AppMode;
   showOnboardingChoice: boolean;
+  zandoDeviceId: string;
   storeSlots: StoreSlot[];
   activeStoreId: string;
+  activeStoreSlot: StoreSlot;
+  activePermissions: StorePermissions;
   storeProfile: StoreProfile;
   products: Product[];
   promotions: Promotion[];
@@ -86,19 +122,48 @@ interface StoreContextValue {
   assistantMessages: AssistantMessage[];
   schemaMeta: SchemaMeta | null;
   toasts: ToastMessage[];
+  notifications: AppNotification[];
+  unreadNotificationsCount: number;
   securitySettings: AppSecuritySettings;
   proSettings: ProAppSettings;
   securityAuditLog: SecurityAuditEntry[];
   isLocked: boolean;
   notify: (text: string, tone?: ToastMessage['tone']) => void;
   dismissToast: (id: string) => void;
+  pushAppNotification: (
+    input: Omit<AppNotification, 'id' | 'createdAt' | 'read'>,
+  ) => void;
+  markNotificationRead: (id: string) => void;
+  markAllNotificationsRead: () => void;
+  clearReadNotifications: () => void;
   reloadAll: () => Promise<void>;
   enterDemoMode: () => Promise<void>;
   resetDemoMode: () => Promise<void>;
   startRealStore: () => Promise<void>;
   switchStore: (storeId: string) => Promise<void>;
   createNewStore: (name: string, currency?: string) => Promise<StoreSlot>;
+  removeStoreSlot: (storeId: string) => Promise<void>;
   removeSecondaryStore: (storeId: string) => Promise<void>;
+  sellStoreSlot: (params: {
+    storeId: string;
+    buyerZandoId: string;
+    buyerName?: string;
+    salePrice?: string;
+    note?: string;
+  }) => Promise<TransferPackageResult>;
+  createCollaborationPackage: (params: {
+    storeId: string;
+    collaboratorZandoId: string;
+    collaboratorName: string;
+    preset: CollaboratorPresetRole;
+    permissions: StorePermissions;
+    note?: string;
+  }) => Promise<TransferPackageResult>;
+  revokeStoreCollaborator: (storeId: string, collaboratorId: string) => void;
+  importStoreTransfer: (rawOrEnvelope: string | StoreTransferEnvelope) => Promise<{
+    kind: 'sale' | 'collaboration';
+    slot: StoreSlot;
+  }>;
   saveStoreProfile: (next: StoreProfile) => Promise<void>;
   saveProduct: (product: Product) => Promise<void>;
   importProductsBatch: (products: Product[]) => Promise<void>;
@@ -119,9 +184,10 @@ interface StoreContextValue {
   addCreditTransaction: (entry: CreditTransaction) => Promise<void>;
   askAssistant: (question: string) => Promise<AssistantMessage>;
   clearAssistantHistory: () => Promise<void>;
-  unlockWithPin: (pin: string) => Promise<{ok: boolean; error?: string; lockedUntil?: number}>;
-  verifyCurrentPin: (pin: string) => Promise<boolean>;
+  unlockWithPin: (secret: string) => Promise<{ok: boolean; error?: string; lockedUntil?: number}>;
+  verifyCurrentPin: (secret: string) => Promise<boolean>;
   lockAppNow: () => void;
+  enableSecurityLock: (method: LockMethod, secret: string) => Promise<void>;
   enablePinLock: (pin: string) => Promise<void>;
   disablePinLock: () => void;
   updateSecuritySettings: (patch: Partial<AppSecuritySettings>) => void;
@@ -137,6 +203,7 @@ export const StoreProvider: React.FC<{children: React.ReactNode}> = ({children})
   const [error, setError] = useState<string | null>(null);
   const [appMode, setAppMode] = useState<AppMode>(() => getStoredAppMode());
   const [showOnboardingChoice, setShowOnboardingChoice] = useState(false);
+  const [zandoDeviceId] = useState<string>(() => getOrCreateZandoDeviceId());
   const [storeSlots, setStoreSlots] = useState<StoreSlot[]>(() => getStoreSlots());
   const [activeStoreId, setActiveStoreIdState] = useState<string>(() => getActiveStoreId());
 
@@ -165,6 +232,23 @@ export const StoreProvider: React.FC<{children: React.ReactNode}> = ({children})
   const [assistantMessages, setAssistantMessages] = useState<AssistantMessage[]>([]);
   const [schemaMeta, setSchemaMeta] = useState<SchemaMeta | null>(null);
   const [toasts, setToasts] = useState<ToastMessage[]>([]);
+  const [storedNotifications, setStoredNotifications] = useState<AppNotification[]>(() =>
+    getStoredNotifications(),
+  );
+  const [readDynamicIds, setReadDynamicIds] = useState<string[]>(() => getReadDynamicIds());
+
+  const activeStoreSlot = useMemo(
+    () => storeSlots.find((s) => s.id === activeStoreId) ?? storeSlots[0],
+    [storeSlots, activeStoreId],
+  );
+
+  const activePermissions: StorePermissions = useMemo(() => {
+    if (appMode === 'demo') return DEFAULT_OWNER_PERMISSIONS;
+    if (activeStoreSlot?.role === 'collaborator' && activeStoreSlot.permissions) {
+      return activeStoreSlot.permissions;
+    }
+    return DEFAULT_OWNER_PERMISSIONS;
+  }, [appMode, activeStoreSlot]);
 
   const notify = useCallback((text: string, tone: ToastMessage['tone'] = 'info') => {
     const id = `${Date.now()}_${Math.random().toString(36).slice(2, 6)}`;
@@ -176,6 +260,97 @@ export const StoreProvider: React.FC<{children: React.ReactNode}> = ({children})
 
   const dismissToast = useCallback((id: string) => {
     setToasts((prev) => prev.filter((t) => t.id !== id));
+  }, []);
+
+  const pushAppNotification = useCallback(
+    (input: Omit<AppNotification, 'id' | 'createdAt' | 'read'>) => {
+      const next = appendLocalNotification(
+        input,
+        Boolean(securitySettings.browserNotificationsEnabled),
+      );
+      setStoredNotifications(next);
+    },
+    [securitySettings.browserNotificationsEnabled],
+  );
+
+  const dynamicAlerts = useMemo(
+    () =>
+      buildDynamicStoreAlerts({
+        products,
+        sales,
+        orders,
+        customers,
+        creditTransactions,
+        schemaMeta,
+        securitySettings,
+        currency: storeProfile.currency || 'FCFA',
+        activeStoreSlot: appMode === 'demo' ? undefined : activeStoreSlot,
+        readDynamicIds,
+      }),
+    [
+      products,
+      sales,
+      orders,
+      customers,
+      creditTransactions,
+      schemaMeta,
+      securitySettings,
+      storeProfile.currency,
+      appMode,
+      activeStoreSlot,
+      readDynamicIds,
+    ],
+  );
+
+  const notifications = useMemo(() => {
+    const combined = [...dynamicAlerts, ...storedNotifications];
+    return combined.sort((a, b) => {
+      if (a.read !== b.read) return a.read ? 1 : -1;
+      return b.createdAt - a.createdAt;
+    });
+  }, [dynamicAlerts, storedNotifications]);
+
+  const unreadNotificationsCount = useMemo(
+    () => notifications.filter((n) => !n.read).length,
+    [notifications],
+  );
+
+  const markNotificationRead = useCallback((id: string) => {
+    if (id.startsWith('dyn_')) {
+      setReadDynamicIds((prev) => {
+        if (prev.includes(id)) return prev;
+        const next = [...prev, id];
+        saveReadDynamicIds(next);
+        return next;
+      });
+      return;
+    }
+    setStoredNotifications((prev) => {
+      const next = prev.map((n) => (n.id === id ? {...n, read: true} : n));
+      saveStoredNotifications(next);
+      return next;
+    });
+  }, []);
+
+  const markAllNotificationsRead = useCallback(() => {
+    setReadDynamicIds((prev) => {
+      const allDyn = Array.from(new Set([...prev, ...dynamicAlerts.map((d) => d.id)]));
+      saveReadDynamicIds(allDyn);
+      return allDyn;
+    });
+    setStoredNotifications((prev) => {
+      const next = prev.map((n) => ({...n, read: true}));
+      saveStoredNotifications(next);
+      return next;
+    });
+  }, [dynamicAlerts]);
+
+  const clearReadNotifications = useCallback(() => {
+    setStoredNotifications((prev) => {
+      const next = prev.filter((n) => !n.read);
+      saveStoredNotifications(next);
+      return next;
+    });
   }, []);
 
   const reloadAll = useCallback(async () => {
@@ -204,7 +379,7 @@ export const StoreProvider: React.FC<{children: React.ReactNode}> = ({children})
     }
   }, []);
 
-  // Boot sequence: always open normally in the real local workspace (demo mode is opt-in from Settings)
+  // Boot offline-first: zero network calls on startup
   useEffect(() => {
     let active = true;
     (async () => {
@@ -222,7 +397,6 @@ export const StoreProvider: React.FC<{children: React.ReactNode}> = ({children})
     };
   }, [reloadAll]);
 
-  // Apply light/dark theme + merchant brand CSS custom properties to documentElement
   useEffect(() => {
     const root = document.documentElement;
     if (storeProfile.themeMode === 'dark') {
@@ -239,7 +413,7 @@ export const StoreProvider: React.FC<{children: React.ReactNode}> = ({children})
     root.style.setProperty('--brand-accent-fg', getContrastTextColor(accent));
   }, [storeProfile.themeMode, storeProfile.primaryColor, storeProfile.accentColor]);
 
-  // Auto-lock inactivity monitor
+  // Accurate auto-lock timer supporting 15s, 30s, 1m, 5m, 15m, 30m
   useEffect(() => {
     if (!securitySettings.pinEnabled || !securitySettings.pinHash) return;
     const markActivity = () => {
@@ -249,20 +423,20 @@ export const StoreProvider: React.FC<{children: React.ReactNode}> = ({children})
     window.addEventListener('keydown', markActivity, {passive: true});
 
     const timer = window.setInterval(() => {
-      if (securitySettings.autoLockMinutes > 0 && !isLocked) {
+      if (securitySettings.autoLockSeconds > 0 && !isLocked) {
         const elapsedMs = Date.now() - lastActivityRef.current;
-        if (elapsedMs >= securitySettings.autoLockMinutes * 60 * 1000) {
+        if (elapsedMs >= securitySettings.autoLockSeconds * 1000) {
           setIsLocked(true);
         }
       }
-    }, 15000);
+    }, 2000);
 
     return () => {
       window.removeEventListener('pointerdown', markActivity);
       window.removeEventListener('keydown', markActivity);
       window.clearInterval(timer);
     };
-  }, [securitySettings.pinEnabled, securitySettings.pinHash, securitySettings.autoLockMinutes, isLocked]);
+  }, [securitySettings.pinEnabled, securitySettings.pinHash, securitySettings.autoLockSeconds, isLocked]);
 
   const logSecurityEvent = useCallback((action: string, detail: string) => {
     const next = appendSecurityAudit(action, detail);
@@ -309,6 +483,9 @@ export const StoreProvider: React.FC<{children: React.ReactNode}> = ({children})
 
   const switchStore = useCallback(
     async (storeId: string) => {
+      if (appMode !== 'demo' && storeId === activeStoreId) {
+        return;
+      }
       setLoading(true);
       clearAllCachedUrls();
       await closeAndClearDbCache();
@@ -323,7 +500,7 @@ export const StoreProvider: React.FC<{children: React.ReactNode}> = ({children})
       logSecurityEvent('Boutique', `Basculement vers « ${target?.name ?? storeId} »`);
       notify(`Boutique active : ${target?.name ?? 'Boutique'}`, 'success');
     },
-    [appMode, reloadAll, notify, logSecurityEvent],
+    [appMode, activeStoreId, reloadAll, notify, logSecurityEvent],
   );
 
   const createNewStore = useCallback(
@@ -346,13 +523,21 @@ export const StoreProvider: React.FC<{children: React.ReactNode}> = ({children})
       });
       await reloadAll();
       logSecurityEvent('Boutique', `Création de la boutique « ${slot.name} »`);
+      pushAppNotification({
+        category: 'system',
+        severity: 'success',
+        title: `Nouvelle boutique : ${slot.name}`,
+        message: 'Espace indépendant prêt à être configuré hors ligne.',
+        actionRoute: 'store',
+        actionLabel: 'Configurer',
+      });
       notify(`Nouvelle boutique « ${slot.name} » ouverte.`, 'success');
       return slot;
     },
-    [appMode, reloadAll, notify, logSecurityEvent],
+    [appMode, reloadAll, notify, logSecurityEvent, pushAppNotification],
   );
 
-  const removeSecondaryStore = useCallback(
+  const removeStoreSlot = useCallback(
     async (storeId: string) => {
       const target = getStoreSlots().find((s) => s.id === storeId);
       setLoading(true);
@@ -360,11 +545,256 @@ export const StoreProvider: React.FC<{children: React.ReactNode}> = ({children})
       const nextId = await deleteStoreSlot(storeId);
       setStoreSlots(getStoreSlots());
       setActiveStoreIdState(nextId);
+      if (appMode === 'demo') {
+        setStoredAppMode('real');
+        setAppMode('real');
+      }
       await reloadAll();
       logSecurityEvent('Boutique', `Suppression de la boutique « ${target?.name ?? storeId} »`);
-      notify('Boutique supprimée.', 'info');
+      pushAppNotification({
+        category: 'system',
+        severity: 'info',
+        title: 'Boutique supprimée',
+        message: `La boutique « ${target?.name ?? storeId} » a été retirée de cet appareil.`,
+      });
+      notify(`Boutique « ${target?.name ?? ''} » supprimée.`, 'info');
     },
-    [reloadAll, notify, logSecurityEvent],
+    [appMode, reloadAll, notify, logSecurityEvent, pushAppNotification],
+  );
+
+  const sellStoreSlot = useCallback(
+    async (params: {
+      storeId: string;
+      buyerZandoId: string;
+      buyerName?: string;
+      salePrice?: string;
+      note?: string;
+    }): Promise<TransferPackageResult> => {
+      const slots = getStoreSlots();
+      const target = slots.find((s) => s.id === params.storeId);
+      if (!target) throw new Error('Boutique introuvable.');
+      if (target.role === 'collaborator') {
+        throw new Error('Seul le propriétaire d’origine peut revendre cette boutique.');
+      }
+
+      const pkg = await buildStoreTransferPackage({
+        slot: target,
+        kind: 'sale',
+        senderZandoId: zandoDeviceId,
+        receiverZandoId: params.buyerZandoId,
+        receiverName: params.buyerName,
+        salePrice: params.salePrice,
+        note: params.note,
+      });
+
+      // Après création du paquet de cession, supprimer la boutique chez le vendeur
+      setLoading(true);
+      clearAllCachedUrls();
+      const nextId = await deleteStoreSlot(target.id, {allowResetIfLast: true});
+      setStoreSlots(getStoreSlots());
+      setActiveStoreIdState(nextId);
+      if (appMode === 'demo') {
+        setStoredAppMode('real');
+        setAppMode('real');
+      }
+      await reloadAll();
+
+      logSecurityEvent(
+        'Vente de boutique',
+        `Boutique « ${target.name} » cédée à ${pkg.envelope.receiverZandoId} et supprimée de cet appareil`,
+      );
+      pushAppNotification({
+        category: 'transfer',
+        severity: 'success',
+        title: `Boutique vendue : ${target.name}`,
+        message: `Transférée vers ${pkg.envelope.receiverZandoId} et supprimée de votre appareil.`,
+      });
+      notify(
+        `Boutique « ${target.name} » transférée et supprimée de votre appareil.`,
+        'success',
+      );
+      return pkg;
+    },
+    [appMode, zandoDeviceId, reloadAll, logSecurityEvent, pushAppNotification, notify],
+  );
+
+  const createCollaborationPackage = useCallback(
+    async (params: {
+      storeId: string;
+      collaboratorZandoId: string;
+      collaboratorName: string;
+      preset: CollaboratorPresetRole;
+      permissions: StorePermissions;
+      note?: string;
+    }): Promise<TransferPackageResult> => {
+      const slots = getStoreSlots();
+      const target = slots.find((s) => s.id === params.storeId);
+      if (!target) throw new Error('Boutique introuvable.');
+      if (target.role === 'collaborator') {
+        throw new Error('Seul le propriétaire peut inviter d’autres collaborateurs.');
+      }
+
+      const pkg = await buildStoreTransferPackage({
+        slot: target,
+        kind: 'collaboration',
+        senderZandoId: zandoDeviceId,
+        receiverZandoId: params.collaboratorZandoId,
+        receiverName: params.collaboratorName,
+        note: params.note,
+        permissions: params.permissions,
+      });
+
+      const entry: StoreCollaborator = {
+        id: generateId('colab'),
+        zandoId: pkg.envelope.receiverZandoId,
+        name: params.collaboratorName.trim() || pkg.envelope.receiverZandoId,
+        preset: params.preset,
+        permissions: params.permissions,
+        createdAt: Date.now(),
+      };
+      const existingList = (target.collaborators ?? []).filter(
+        (c) => c.zandoId !== entry.zandoId,
+      );
+      updateStoreCollaborators(target.id, [entry, ...existingList]);
+      setStoreSlots(getStoreSlots());
+
+      logSecurityEvent(
+        'Collaboration',
+        `Accès partagé sur « ${target.name} » pour ${entry.name} (${entry.zandoId})`,
+      );
+      pushAppNotification({
+        category: 'transfer',
+        severity: 'info',
+        title: `Collaboration créée : ${target.name}`,
+        message: `${entry.name} (${entry.zandoId}) a reçu des droits d’utilisation. Votre boutique reste conservée ici.`,
+        actionRoute: 'store',
+        actionLabel: 'Voir boutique',
+      });
+      notify(`Accès collaboration généré pour ${entry.name}. La boutique reste sur votre appareil.`, 'success');
+      return pkg;
+    },
+    [zandoDeviceId, logSecurityEvent, pushAppNotification, notify],
+  );
+
+  const revokeStoreCollaborator = useCallback(
+    (storeId: string, collaboratorId: string) => {
+      const slots = getStoreSlots();
+      const target = slots.find((s) => s.id === storeId);
+      if (!target) return;
+      const col = target.collaborators?.find((c) => c.id === collaboratorId);
+      const nextList = (target.collaborators ?? []).filter((c) => c.id !== collaboratorId);
+      updateStoreCollaborators(storeId, nextList);
+      setStoreSlots(getStoreSlots());
+      logSecurityEvent(
+        'Collaboration',
+        `Accès retiré pour ${col?.name || collaboratorId} sur « ${target.name} »`,
+      );
+      notify('Collaborateur retiré de la liste.', 'info');
+    },
+    [logSecurityEvent, notify],
+  );
+
+  const importStoreTransfer = useCallback(
+    async (
+      rawOrEnvelope: string | StoreTransferEnvelope,
+    ): Promise<{kind: 'sale' | 'collaboration'; slot: StoreSlot}> => {
+      const envelope =
+        typeof rawOrEnvelope === 'string' ? parseTransferInput(rawOrEnvelope) : rawOrEnvelope;
+      const decrypted = await decryptStoreTransferEnvelope(envelope, zandoDeviceId);
+
+      const slots = getStoreSlots();
+      let targetSlot: StoreSlot | null = null;
+
+      // Si l'utilisateur n'a qu'un seul emplacement vierge par défaut, l'utiliser directement
+      if (slots.length === 1 && slots[0].role !== 'collaborator') {
+        const isEmpty = await isStoreSlotEmpty(slots[0].dbName);
+        if (
+          isEmpty &&
+          (slots[0].name === 'Boutique Principale' || slots[0].name === 'Ma Boutique')
+        ) {
+          targetSlot = slots[0];
+        }
+      }
+
+      if (!targetSlot) {
+        if (slots.length >= MAX_STORES) {
+          throw new Error(
+            `Vous avez déjà ${MAX_STORES} boutiques ouvertes. Supprimez ou cédez une boutique avant d’importer « ${decrypted.backupPayload.storeProfile.name} ».`,
+          );
+        }
+        targetSlot = createStoreSlot(
+          decrypted.backupPayload.storeProfile.name || envelope.storeName || 'Boutique importée',
+          decrypted.backupPayload.storeProfile.currency || 'FCFA',
+        );
+      }
+
+      setLoading(true);
+      clearAllCachedUrls();
+      await closeAndClearDbCache();
+
+      await restoreBackupPayloadToDatabase(
+        targetSlot.dbName,
+        decrypted.backupPayload,
+        envelope.kind === 'sale'
+          ? `Achat / reprise de la boutique « ${envelope.storeName} » depuis ${decrypted.ownerZandoId}`
+          : `Collaboration reçue sur « ${envelope.storeName} » depuis ${decrypted.ownerZandoId}`,
+      );
+
+      const resolvedName =
+        decrypted.backupPayload.storeProfile.name || envelope.storeName || targetSlot.name;
+      const resolvedCurrency = decrypted.backupPayload.storeProfile.currency || targetSlot.currency;
+
+      if (envelope.kind === 'collaboration') {
+        markSlotAsCollaborator(
+          targetSlot.id,
+          decrypted.ownerZandoId,
+          decrypted.collaboratorName,
+          decrypted.permissions,
+          resolvedName,
+          resolvedCurrency,
+        );
+      } else {
+        updateStoreSlotMeta(targetSlot.id, resolvedName, resolvedCurrency);
+      }
+
+      setActiveStoreId(targetSlot.id);
+      setActiveStoreIdState(targetSlot.id);
+      setStoreSlots(getStoreSlots());
+      if (appMode === 'demo') {
+        setStoredAppMode('real');
+        setAppMode('real');
+      }
+
+      await reloadAll();
+      const updatedSlot = getStoreSlots().find((s) => s.id === targetSlot.id) ?? targetSlot;
+
+      logSecurityEvent(
+        envelope.kind === 'sale' ? 'Achat de boutique' : 'Collaboration acceptée',
+        `Boutique « ${resolvedName} » importée depuis ${decrypted.ownerZandoId}`,
+      );
+      pushAppNotification({
+        category: 'transfer',
+        severity: 'success',
+        title:
+          envelope.kind === 'sale'
+            ? `Boutique acquise : ${resolvedName}`
+            : `Collaboration activée : ${resolvedName}`,
+        message:
+          envelope.kind === 'sale'
+            ? `La boutique est maintenant installée en local et vous en êtes le propriétaire.`
+            : `Vous disposez désormais des droits attribués par ${decrypted.ownerZandoId}.`,
+        actionRoute: 'dashboard',
+        actionLabel: 'Ouvrir',
+      });
+      notify(
+        envelope.kind === 'sale'
+          ? `Boutique « ${resolvedName} » achetée et importée avec succès !`
+          : `Accès collaboration à « ${resolvedName} » activé !`,
+        'success',
+      );
+      return {kind: envelope.kind, slot: updatedSlot};
+    },
+    [appMode, zandoDeviceId, reloadAll, logSecurityEvent, pushAppNotification, notify],
   );
 
   const saveStoreProfile = useCallback(
@@ -379,7 +809,6 @@ export const StoreProvider: React.FC<{children: React.ReactNode}> = ({children})
         setStoreSlots(getStoreSlots());
       }
 
-      // Si le numéro WhatsApp de la boutique change, synchroniser les catalogues qui utilisaient l'ancien numéro (ou aucun numéro)
       if (updated.phone !== prevPhone && catalogs.length > 0) {
         const synced: SavedCatalog[] = [];
         let changed = false;
@@ -418,8 +847,16 @@ export const StoreProvider: React.FC<{children: React.ReactNode}> = ({children})
     async (items: Product[]) => {
       await bulkPutProducts(items);
       await reloadAll();
+      pushAppNotification({
+        category: 'stock',
+        severity: 'success',
+        title: 'Importation de produits terminée',
+        message: `${items.length} article(s) ajouté(s) ou mis à jour dans le stock.`,
+        actionRoute: 'products',
+        actionLabel: 'Voir produits',
+      });
     },
-    [reloadAll],
+    [reloadAll, pushAppNotification],
   );
 
   const removeProduct = useCallback(async (product: Product) => {
@@ -471,8 +908,20 @@ export const StoreProvider: React.FC<{children: React.ReactNode}> = ({children})
       await recordSaleWithStockDeduction(sale);
       playSaleFeedbackBeep(proSettings.soundFeedback);
       await reloadAll();
+
+      const unpaid = Math.max(0, sale.total - (sale.amountPaid ?? sale.total));
+      if (unpaid > 0) {
+        pushAppNotification({
+          category: 'credit',
+          severity: 'warning',
+          title: `Vente à crédit : ${sale.customerName || 'Client'}`,
+          message: `Reste dû : ${formatMoney(unpaid, storeProfile.currency)} (${sale.receiptNumber}).`,
+          actionRoute: 'credits',
+          actionLabel: 'Voir crédits',
+        });
+      }
     },
-    [reloadAll, proSettings.soundFeedback],
+    [reloadAll, proSettings.soundFeedback, pushAppNotification, storeProfile.currency],
   );
 
   const removeSale = useCallback(async (id: string) => {
@@ -480,18 +929,32 @@ export const StoreProvider: React.FC<{children: React.ReactNode}> = ({children})
     setSales((prev) => prev.filter((s) => s.id !== id));
   }, []);
 
-  const saveOrder = useCallback(async (order: Order) => {
-    await putRecord(STORES.ORDERS, order);
-    setOrders((prev) => {
-      const idx = prev.findIndex((o) => o.id === order.id);
-      if (idx >= 0) {
-        const copy = [...prev];
-        copy[idx] = order;
-        return copy.sort((a, b) => b.createdAt - a.createdAt);
+  const saveOrder = useCallback(
+    async (order: Order) => {
+      const isNew = !orders.some((o) => o.id === order.id);
+      await putRecord(STORES.ORDERS, order);
+      setOrders((prev) => {
+        const idx = prev.findIndex((o) => o.id === order.id);
+        if (idx >= 0) {
+          const copy = [...prev];
+          copy[idx] = order;
+          return copy.sort((a, b) => b.createdAt - a.createdAt);
+        }
+        return [order, ...prev];
+      });
+      if (isNew) {
+        pushAppNotification({
+          category: 'order',
+          severity: 'info',
+          title: `Nouvelle commande ${order.orderNumber}`,
+          message: `${order.customerName} · ${formatMoney(order.total, storeProfile.currency)} (${order.channel})`,
+          actionRoute: 'orders',
+          actionLabel: 'Traiter',
+        });
       }
-      return [order, ...prev];
-    });
-  }, []);
+    },
+    [orders, pushAppNotification, storeProfile.currency],
+  );
 
   const removeOrder = useCallback(async (id: string) => {
     await deleteRecord(STORES.ORDERS, id);
@@ -615,7 +1078,7 @@ export const StoreProvider: React.FC<{children: React.ReactNode}> = ({children})
   }, []);
 
   const unlockWithPin = useCallback(
-    async (pin: string): Promise<{ok: boolean; error?: string; lockedUntil?: number}> => {
+    async (secret: string): Promise<{ok: boolean; error?: string; lockedUntil?: number}> => {
       const cooldown = getLockCooldownState();
       if (cooldown.lockedUntil > Date.now()) {
         return {
@@ -624,32 +1087,52 @@ export const StoreProvider: React.FC<{children: React.ReactNode}> = ({children})
           lockedUntil: cooldown.lockedUntil,
         };
       }
-      const valid = await verifyPinCode(pin, securitySettings.pinHash, securitySettings.pinSalt);
+      const methodLabel = getLockMethodLabel(securitySettings.lockMethod);
+      const valid = await verifyPinCode(secret, securitySettings.pinHash, securitySettings.pinSalt);
       if (valid) {
         clearPinCooldown();
         lastActivityRef.current = Date.now();
         setIsLocked(false);
-        logSecurityEvent('Déverrouillage', 'Session déverrouillée par code PIN');
+        logSecurityEvent('Déverrouillage', `Session déverrouillée par ${methodLabel.toLowerCase()}`);
         return {ok: true};
       }
       const nextCool = recordFailedPinAttempt();
-      logSecurityEvent('Alerte sécurité', `Code PIN incorrect (tentative #${nextCool.attempts})`);
+      logSecurityEvent(
+        'Alerte sécurité',
+        `${methodLabel} incorrect (tentative #${nextCool.attempts})`,
+      );
+      if (nextCool.attempts >= 5) {
+        pushAppNotification({
+          category: 'security',
+          severity: 'urgent',
+          title: 'Tentatives de déverrouillage répétées',
+          message: `5 échecs de saisie (${methodLabel}). Verrouillage temporaire de 30s activé.`,
+          actionRoute: 'backup',
+          actionLabel: 'Journal sécurité',
+        });
+      }
       return {
         ok: false,
         error:
           nextCool.lockedUntil > Date.now()
             ? '5 tentatives échouées : verrouillage temporaire de 30 secondes.'
-            : 'Code PIN incorrect.',
+            : `${methodLabel} incorrect.`,
         lockedUntil: nextCool.lockedUntil,
       };
     },
-    [securitySettings.pinHash, securitySettings.pinSalt, logSecurityEvent],
+    [
+      securitySettings.pinHash,
+      securitySettings.pinSalt,
+      securitySettings.lockMethod,
+      logSecurityEvent,
+      pushAppNotification,
+    ],
   );
 
   const verifyCurrentPin = useCallback(
-    async (pin: string): Promise<boolean> => {
+    async (secret: string): Promise<boolean> => {
       if (!securitySettings.pinEnabled) return true;
-      return verifyPinCode(pin, securitySettings.pinHash, securitySettings.pinSalt);
+      return verifyPinCode(secret, securitySettings.pinHash, securitySettings.pinSalt);
     },
     [securitySettings.pinEnabled, securitySettings.pinHash, securitySettings.pinSalt],
   );
@@ -660,12 +1143,13 @@ export const StoreProvider: React.FC<{children: React.ReactNode}> = ({children})
     logSecurityEvent('Verrouillage', 'Application verrouillée manuellement');
   }, [securitySettings.pinEnabled, logSecurityEvent]);
 
-  const enablePinLock = useCallback(
-    async (pin: string) => {
-      const {hash, salt} = await hashPinCode(pin);
+  const enableSecurityLock = useCallback(
+    async (method: LockMethod, secret: string) => {
+      const {hash, salt} = await hashPinCode(secret);
       const next: AppSecuritySettings = {
         ...securitySettings,
         pinEnabled: true,
+        lockMethod: method,
         pinHash: hash,
         pinSalt: salt,
       };
@@ -673,9 +1157,25 @@ export const StoreProvider: React.FC<{children: React.ReactNode}> = ({children})
       setSecuritySettings(next);
       clearPinCooldown();
       lastActivityRef.current = Date.now();
-      logSecurityEvent('Sécurité PIN', 'Code PIN de verrouillage activé / modifié');
+      const label = getLockMethodLabel(method);
+      logSecurityEvent('Sécurité', `Verrouillage par ${label} activé / modifié`);
+      pushAppNotification({
+        category: 'security',
+        severity: 'success',
+        title: `Verrouillage par ${label} activé`,
+        message: 'Votre accès caisse est désormais protégé localement.',
+        actionRoute: 'backup',
+        actionLabel: 'Sécurité',
+      });
     },
-    [securitySettings, logSecurityEvent],
+    [securitySettings, logSecurityEvent, pushAppNotification],
+  );
+
+  const enablePinLock = useCallback(
+    async (pin: string) => {
+      await enableSecurityLock('pin', pin);
+    },
+    [enableSecurityLock],
   );
 
   const disablePinLock = useCallback(() => {
@@ -689,8 +1189,16 @@ export const StoreProvider: React.FC<{children: React.ReactNode}> = ({children})
     setSecuritySettings(next);
     setIsLocked(false);
     clearPinCooldown();
-    logSecurityEvent('Sécurité PIN', 'Code PIN de verrouillage désactivé');
-  }, [securitySettings, logSecurityEvent]);
+    logSecurityEvent('Sécurité', 'Verrouillage d’application désactivé');
+    pushAppNotification({
+      category: 'security',
+      severity: 'warning',
+      title: 'Verrouillage désactivé',
+      message: 'Le verrouillage d’accès à ZANDO Pro a été retiré.',
+      actionRoute: 'backup',
+      actionLabel: 'Sécurité',
+    });
+  }, [securitySettings, logSecurityEvent, pushAppNotification]);
 
   const updateSecuritySettings = useCallback(
     (patch: Partial<AppSecuritySettings>) => {
@@ -723,8 +1231,11 @@ export const StoreProvider: React.FC<{children: React.ReactNode}> = ({children})
         error,
         appMode,
         showOnboardingChoice,
+        zandoDeviceId,
         storeSlots,
         activeStoreId,
+        activeStoreSlot,
+        activePermissions,
         storeProfile,
         products,
         promotions,
@@ -737,19 +1248,30 @@ export const StoreProvider: React.FC<{children: React.ReactNode}> = ({children})
         assistantMessages,
         schemaMeta,
         toasts,
+        notifications,
+        unreadNotificationsCount,
         securitySettings,
         proSettings,
         securityAuditLog,
         isLocked,
         notify,
         dismissToast,
+        pushAppNotification,
+        markNotificationRead,
+        markAllNotificationsRead,
+        clearReadNotifications,
         reloadAll,
         enterDemoMode,
         resetDemoMode,
         startRealStore,
         switchStore,
         createNewStore,
-        removeSecondaryStore,
+        removeStoreSlot,
+        removeSecondaryStore: removeStoreSlot,
+        sellStoreSlot,
+        createCollaborationPackage,
+        revokeStoreCollaborator,
+        importStoreTransfer,
         saveStoreProfile,
         saveProduct,
         importProductsBatch,
@@ -773,6 +1295,7 @@ export const StoreProvider: React.FC<{children: React.ReactNode}> = ({children})
         unlockWithPin,
         verifyCurrentPin,
         lockAppNow,
+        enableSecurityLock,
         enablePinLock,
         disablePinLock,
         updateSecuritySettings,
