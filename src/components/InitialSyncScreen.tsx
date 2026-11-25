@@ -41,7 +41,7 @@ export const InitialSyncScreen: React.FC<InitialSyncScreenProps> = ({onSyncCompl
   const isOnline = useOnlineStatus();
 
   const [serverOriginInput, setServerOriginInput] = useState(() => getCustomSyncApiOrigin());
-  const [serverConfigOpen, setServerConfigOpen] = useState(() => !getSyncApiOrigin());
+  const [serverConfigOpen, setServerConfigOpen] = useState(false);
   const [checkingServer, setCheckingServer] = useState(false);
   const [serverReachable, setServerReachable] = useState<boolean | null>(null);
   const [serverInfoMsg, setServerInfoMsg] = useState<string | null>(null);
@@ -73,10 +73,12 @@ export const InitialSyncScreen: React.FC<InitialSyncScreenProps> = ({onSyncCompl
     setServerReachable(res.reachable);
     setServerInfoMsg(
       res.reachable
-        ? `Serveur prêt (${res.manifest?.requiredAssets.length ?? 0} ressources à vérifier)`
+        ? res.mode === 'static'
+          ? `Prêt pour mise en cache hors ligne (${res.manifest?.requiredAssets.length ?? 0} ressources)`
+          : `Serveur prêt (${res.manifest?.requiredAssets.length ?? 0} ressources à vérifier)`
         : res.error || 'Serveur de synchronisation indisponible.',
     );
-    if (!res.origin) {
+    if (!res.reachable && !res.origin && getCustomSyncApiOrigin()) {
       setServerConfigOpen(true);
     }
     setCheckingServer(false);

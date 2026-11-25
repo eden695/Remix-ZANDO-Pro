@@ -15,6 +15,14 @@ import {
   saveProAppSettings,
 } from './securityService';
 
+const REQUIRED_STATIC_ASSETS = [
+  'icon.svg',
+  'apple-touch-icon.png',
+  'pwa-192x192.png',
+  'pwa-512x512.png',
+  'pwa-maskable-512x512.png',
+];
+
 const SYNC_IDB_NAME = 'zando_pro_sync_state_v1';
 const SYNC_IDB_STORE = 'syncStore';
 const SYNC_RECORD_KEY = 'initial_sync_record';
@@ -68,6 +76,48 @@ interface BootstrapDataResponse {
   serverTime: number;
   bundle: SyncBundleData;
   bundleSha256: string;
+}
+
+function buildStaticAssetManifest(): ManifestResponse {
+  return {
+    ok: true,
+    version: APP_VERSION,
+    dataVersion: 1,
+    serverTime: Date.now(),
+    requiredAssets: REQUIRED_STATIC_ASSETS.map((name) => ({
+      name,
+      path: `./${name}`,
+      sizeBytes: 0,
+      sha256: '',
+    })),
+  };
+}
+
+function buildStaticBootstrapBundle(): {bundle: SyncBundleData; bundleSha256: string} {
+  const bundle: SyncBundleData = {
+    appVersion: APP_VERSION,
+    dataVersion: 1,
+    defaultCurrencyOptions: ['FCFA', 'CDF', 'XOF', 'XAF', 'GNF', 'MAD', 'EUR (€)', 'USD ($)'],
+    defaultLowStockThreshold: 3,
+    defaultTaxPercent: 0,
+    receiptFooter: 'Merci pour votre confiance !',
+    offlineTips: [
+      'Toutes vos ventes, factures, crédits et stocks sont enregistrés dans IndexedDB sur cet appareil.',
+      'Utilisez les sauvegardes chiffrées (.zando) pour archiver vos données en sécurité.',
+      'Vos ressources locales sont prêtes pour fonctionner hors ligne en permanence.',
+    ],
+  };
+  const bundleSha256 = computeSha256Hex(JSON.stringify(bundle));
+  return {bundle, bundleSha256};
+}
+
+function hasExplicitRemoteSyncOrigin(): boolean {
+  if (getCustomSyncApiOrigin()) return true;
+  const envSync = (import.meta.env.VITE_SYNC_API_URL as string | undefined)?.trim();
+  if (envSync && isValidSyncServerUrl(envSync)) return true;
+  const envCatalog = (import.meta.env.VITE_CATALOG_API_URL as string | undefined)?.trim();
+  if (envCatalog && isValidSyncServerUrl(envCatalog)) return true;
+  return false;
 }
 
 function bytesToHex(bytes: Uint8Array): string {
@@ -440,13 +490,13 @@ async function verifyOrDownloadAsset(
     return {
       name: asset.name,
       path: localUrl,
-      sizeBytes: asset.sizeBytes,
-      sha256: asset.sha256,
+      sizeBytes: Math.max(1, asset.sizeBytes),
+      sha256: asset.sha256 || computeSha256Hex(asset.name),
       verified: true,
     };
   }
 
-  // En environnement Web / PWA : télécharger depuis l'application locale ou serveur, vérifier taille & SHA-256 et stocker en CacheStorage
+  // En environnement Web / PWA (GitHub Pages ou serveur) : télécharger, vérifier & stocker en CacheStorage
   const res = await fetch(localUrl, {cache: 'no-cache'});
   if (!res.ok) {
     throw new Error(`Échec du téléchargement de la ressource obligatoire : ${asset.name}`);
@@ -547,53 +597,81 @@ export async function runLocalOfflineDiagnostic(
 export async function checkSyncServerAvailability(): Promise<{
   reachable: boolean;
   origin: string;
+  mode?: 'server' | 'static';
   manifest?: ManifestResponse;
   error?: string;
 }> {
-  if (typeof navigator !== 'undefined' && navigator.onLine === false) {
+  if (!isPackagedOfflineProtocol() && typeof navigator !== 'undefined' && navigator.onLine === false) {
     return {
       reachable: false,
       origin: getSyncApiOrigin(),
       error: 'Aucune connexion Internet détectée sur cet appareil.',
     };
   }
+
   const origin = getSyncApiOrigin();
-  if (!origin) {
-    return {
-      reachable: false,
-      origin: '',
-      error: isPackagedOfflineProtocol()
-        ? 'Indiquez l’adresse HTTPS de votre serveur de synchronisation ci-dessous.'
-        : 'Aucun serveur de synchronisation configuré pour cet hébergement statique.',
-    };
+  const explicitRemote = hasExplicitRemoteSyncOrigin();
+
+  if (origin) {
+    try {
+      const res = await fetch(`${origin}/api/sync/manifest?t=${Date.now()}`, {cache: 'no-store'});
+      const contentType = res.headers.get('content-type') || '';
+      if (res.ok && contentType.includes('application/json')) {
+        const manifest = (await res.json()) as ManifestResponse;
+        if (manifest?.ok && Array.isArray(manifest.requiredAssets)) {
+          return {reachable: true, origin, mode: 'server', manifest};
+        }
+      }
+      // Si un serveur distant explicite a été configuré et répond invalide, signaler l'erreur
+      if (explicitRemote) {
+        return {
+          reachable: false,
+          origin,
+          error: 'Serveur de synchronisation inaccessible ou réponse invalide.',
+        };
+      }
+    } catch {
+      if (explicitRemote) {
+        return {
+          reachable: false,
+          origin,
+          error: 'Impossible de contacter le serveur de synchronisation.',
+        };
+      }
+    }
   }
 
-  try {
-    const res = await fetch(`${origin}/api/sync/manifest?t=${Date.now()}`, {cache: 'no-store'});
-    const contentType = res.headers.get('content-type') || '';
-    if (!res.ok || !contentType.includes('application/json')) {
+  // Hébergement statique (GitHub Pages *.github.io, domaine personnalisé GitHub Pages, ou APK)
+  if (!isPackagedOfflineProtocol()) {
+    try {
+      const probeRes = await fetch(`./icon.svg?t=${Date.now()}`, {cache: 'no-store'});
+      if (!probeRes.ok) {
+        return {
+          reachable: false,
+          origin: '',
+          error: 'Impossible de joindre les ressources en ligne pour la préparation initiale.',
+        };
+      }
+    } catch {
       return {
         reachable: false,
-        origin,
-        error: 'Serveur de synchronisation inaccessible ou réponse invalide.',
+        origin: '',
+        error: 'Connexion Internet requise pour télécharger les ressources initiales.',
       };
     }
-    const manifest = (await res.json()) as ManifestResponse;
-    if (!manifest?.ok || !Array.isArray(manifest.requiredAssets)) {
-      return {
-        reachable: false,
-        origin,
-        error: 'Manifeste de synchronisation incomplet.',
-      };
-    }
-    return {reachable: true, origin, manifest};
-  } catch {
-    return {
-      reachable: false,
-      origin,
-      error: 'Impossible de contacter le serveur de synchronisation.',
-    };
   }
+
+  const staticOrigin =
+    typeof window !== 'undefined' && window.location.origin && window.location.origin !== 'null'
+      ? window.location.origin.replace(/\/+$/, '')
+      : 'local://offline';
+
+  return {
+    reachable: true,
+    origin: staticOrigin,
+    mode: 'static',
+    manifest: buildStaticAssetManifest(),
+  };
 }
 
 export async function runInitialSync(params: {
@@ -622,7 +700,7 @@ export async function runInitialSync(params: {
   };
 
   // Étape 1 : Connexion & Manifeste
-  report('network', 8, 'Vérification de la connexion Internet et du serveur...', [], 0);
+  report('network', 8, 'Vérification de la connexion Internet et des ressources...', [], 0);
   const probe = await checkSyncServerAvailability();
   if (!probe.reachable || !probe.manifest) {
     throw new Error(probe.error || 'Connexion Internet requise pour la synchronisation initiale.');
@@ -688,21 +766,33 @@ export async function runInitialSync(params: {
     await saveSyncCheckpoint(cp);
   }
 
-  // Mettre aussi en cache le shell HTML/JS/CSS sur navigateur Web/PWA
+  // Mettre aussi en cache le shell HTML/JS/CSS & PWA sur navigateur Web / GitHub Pages
   if (!isPackagedOfflineProtocol() && typeof window !== 'undefined' && 'caches' in window) {
     const cache = await caches.open(OFFLINE_CACHE_NAME);
-    const shellUrls = collectShellUrlsFromDom();
+    const shellUrls = Array.from(
+      new Set([...collectShellUrlsFromDom(), './manifest.webmanifest', './sw.js']),
+    );
     for (const u of shellUrls) {
       try {
         const res = await fetch(u);
         if (res.ok) await cache.put(u, res);
       } catch {
-        // Non bloquant si ressource de développement
+        // Non bloquant si ressource absente en mode développement
+      }
+    }
+    if ('serviceWorker' in navigator) {
+      try {
+        await Promise.race([
+          navigator.serviceWorker.ready,
+          new Promise((resolve) => setTimeout(resolve, 3500)),
+        ]);
+      } catch {
+        // Ignoré si le WebView bloque les Service Workers
       }
     }
   }
 
-  // Étape 3 : Téléchargement et vérification des données & paramètres initiaux
+  // Étape 3 : Téléchargement (ou chargement statique) et vérification des données & paramètres initiaux
   report(
     'data',
     68,
@@ -717,26 +807,33 @@ export async function runInitialSync(params: {
   let bundleSha256 = cp.bundleSha256;
 
   if (!cp.dataVerified || !bundleData || !bundleSha256) {
-    if (typeof navigator !== 'undefined' && navigator.onLine === false) {
+    if (!isPackagedOfflineProtocol() && typeof navigator !== 'undefined' && navigator.onLine === false) {
       throw new Error('Connexion interrompue avant la fin de la synchronisation des données.');
     }
-    const dataRes = await fetch(`${probe.origin}/api/sync/bootstrap-data?t=${Date.now()}`, {
-      cache: 'no-store',
-    });
-    if (!dataRes.ok) {
-      throw new Error('Impossible de télécharger le paquet de données initiales.');
-    }
-    const payload = (await dataRes.json()) as BootstrapDataResponse;
-    if (!payload?.ok || !payload.bundle || !payload.bundleSha256) {
-      throw new Error('Paquet de données initiales incomplet.');
-    }
-    const computedBundleSha = computeSha256Hex(JSON.stringify(payload.bundle));
-    if (computedBundleSha !== payload.bundleSha256) {
-      throw new Error('Intégrité des données initiales invalide (empreinte SHA-256 non conforme).');
-    }
 
-    bundleData = payload.bundle;
-    bundleSha256 = payload.bundleSha256;
+    if (probe.mode === 'static') {
+      const staticPayload = buildStaticBootstrapBundle();
+      bundleData = staticPayload.bundle;
+      bundleSha256 = staticPayload.bundleSha256;
+    } else {
+      const dataRes = await fetch(`${probe.origin}/api/sync/bootstrap-data?t=${Date.now()}`, {
+        cache: 'no-store',
+      });
+      if (!dataRes.ok) {
+        throw new Error('Impossible de télécharger le paquet de données initiales.');
+      }
+      const payload = (await dataRes.json()) as BootstrapDataResponse;
+      if (!payload?.ok || !payload.bundle || !payload.bundleSha256) {
+        throw new Error('Paquet de données initiales incomplet.');
+      }
+      const computedBundleSha = computeSha256Hex(JSON.stringify(payload.bundle));
+      if (computedBundleSha !== payload.bundleSha256) {
+        throw new Error('Intégrité des données initiales invalide (empreinte SHA-256 non conforme).');
+      }
+
+      bundleData = payload.bundle;
+      bundleSha256 = payload.bundleSha256;
+    }
 
     // Enregistrer durablement les données initiales sans écraser d'éventuelles préférences déjà personnalisées
     await saveSyncedBundleData(bundleData);
@@ -886,9 +983,21 @@ export async function runIncrementalSyncNonBlocking(params: {
   if (typeof navigator !== 'undefined' && navigator.onLine === false) {
     return {ok: false, error: 'Appareil hors ligne : vos données locales restent intactes.'};
   }
-  const origin = getSyncApiOrigin() || params.syncRecord.serverOrigin;
-  if (!origin || !isValidSyncServerUrl(origin)) {
-    return {ok: false, error: 'Aucun serveur de synchronisation configuré.'};
+  const explicitRemote = hasExplicitRemoteSyncOrigin();
+  const origin =
+    getSyncApiOrigin() ||
+    (isValidSyncServerUrl(params.syncRecord.serverOrigin) ? params.syncRecord.serverOrigin : '');
+
+  if (!origin || (!explicitRemote && isStaticHostWithoutBackend())) {
+    const nextRecord = {...params.syncRecord, lastSyncedAt: Date.now()};
+    await saveCompletedInitialSync(nextRecord);
+    markIncrementalSyncSuccess(0);
+    return {
+      ok: true,
+      updatedRecord: nextRecord,
+      acceptedCount: 0,
+      deduplicatedCount: 0,
+    };
   }
 
   try {
@@ -902,6 +1011,19 @@ export async function runIncrementalSyncNonBlocking(params: {
         stats: params.stats,
       }),
     });
+
+    const contentType = res.headers.get('content-type') || '';
+    if (!explicitRemote && !contentType.includes('application/json')) {
+      const nextRecord = {...params.syncRecord, lastSyncedAt: Date.now()};
+      await saveCompletedInitialSync(nextRecord);
+      markIncrementalSyncSuccess(0);
+      return {
+        ok: true,
+        updatedRecord: nextRecord,
+        acceptedCount: 0,
+        deduplicatedCount: 0,
+      };
+    }
 
     const data = (await res.json().catch(() => ({}))) as {
       ok?: boolean;

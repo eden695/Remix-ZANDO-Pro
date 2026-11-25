@@ -18,6 +18,9 @@ jobs:
         with:
           node-version: 22
 
+      - name: Setup Bun
+        uses: oven-sh/setup-bun@v2
+
       - name: Setup Java 17 (Android Gradle)
         uses: actions/setup-java@v4
         with:
@@ -25,18 +28,13 @@ jobs:
           java-version: '17'
 
       - name: Install web dependencies
-        run: |
-          if [ -f package-lock.json ]; then
-            npm ci --no-audit --no-fund --legacy-peer-deps || npm install --no-audit --no-fund --legacy-peer-deps
-          else
-            npm install --no-audit --no-fund --legacy-peer-deps
-          fi
+        run: bun install --frozen-lockfile || bun install
 
       - name: Build offline web bundle (dist/)
         env:
           VITE_BASE_PATH: /
           VITE_CATALOG_API_URL: ${{ vars.VITE_CATALOG_API_URL }}
-        run: npm run build
+        run: bun run build
 
       - name: Wrap dist/ with Capacitor Android (100% offline)
         run: |

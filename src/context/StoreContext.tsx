@@ -26,6 +26,13 @@ import {
   updateStoreCollaborators,
   updateStoreSlotMeta,
 } from '../db/indexedDb';
+import {
+  clearInitialSyncForResync,
+  getSyncState,
+  incrementPendingSyncChanges,
+  readCompletedInitialSync,
+  runIncrementalSyncNonBlocking,
+} from '../services/initialSyncService';
 import {answerCommercialQuestion} from '../services/localAssistantService';
 import {clearAllCachedUrls, deleteMediaBlob} from '../services/mediaService';
 import {
@@ -70,6 +77,7 @@ import {
   CreditTransaction,
   Customer,
   Expense,
+  InitialSyncRecord,
   LockMethod,
   Order,
   ProAppSettings,
@@ -84,6 +92,7 @@ import {
   StoreProfile,
   StoreSlot,
   StoreTransferEnvelope,
+  SyncState,
 } from '../types/commerce';
 import {formatMoney, generateId, getContrastTextColor} from '../utils/format';
 
@@ -103,6 +112,9 @@ export interface TransferPackageResult {
 interface StoreContextValue {
   loading: boolean;
   error: string | null;
+  syncChecking: boolean;
+  initialSyncRecord: InitialSyncRecord | null;
+  syncState: SyncState;
   appMode: AppMode;
   showOnboardingChoice: boolean;
   zandoDeviceId: string;
@@ -130,6 +142,9 @@ interface StoreContextValue {
   isLocked: boolean;
   notify: (text: string, tone?: ToastMessage['tone']) => void;
   dismissToast: (id: string) => void;
+  completeInitialSync: (record: InitialSyncRecord) => void;
+  runManualSync: () => Promise<void>;
+  resetAndResyncInitial: () => Promise<void>;
   pushAppNotification: (
     input: Omit<AppNotification, 'id' | 'createdAt' | 'read'>,
   ) => void;
@@ -201,6 +216,9 @@ const StoreContext = createContext<StoreContextValue | null>(null);
 export const StoreProvider: React.FC<{children: React.ReactNode}> = ({children}) => {
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
+  const [syncChecking, setSyncChecking] = useState(true);
+  const [initialSyncRecord, setInitialSyncRecord] = useState<InitialSyncRecord | null>(null);
+  const [syncState, setSyncState] = useState<SyncState>(() => getSyncState());
   const [appMode, setAppMode] = useState<AppMode>(() => getStoredAppMode());
   const [showOnboardingChoice, setShowOnboardingChoice] = useState(false);
   const [zandoDeviceId] = useState<string>(() => getOrCreateZandoDeviceId());
@@ -379,10 +397,18 @@ export const StoreProvider: React.FC<{children: React.ReactNode}> = ({children})
     }
   }, []);
 
-  // Boot offline-first: zero network calls on startup
+  // Boot offline-first: check completed initial sync locally and load IndexedDB without mandatory network calls
   useEffect(() => {
     let active = true;
     (async () => {
+      try {
+        const rec = await readCompletedInitialSync();
+        if (!active) return;
+        setInitialSyncRecord(rec);
+        setSyncState(getSyncState());
+      } finally {
+        if (active) setSyncChecking(false);
+      }
       const storedMode = getStoredAppMode();
       if (storedMode === 'unset') {
         if (!active) return;
@@ -396,6 +422,84 @@ export const StoreProvider: React.FC<{children: React.ReactNode}> = ({children})
       active = false;
     };
   }, [reloadAll]);
+
+  const completeInitialSync = useCallback(
+    (record: InitialSyncRecord) => {
+      setInitialSyncRecord(record);
+      setSyncState(getSyncState());
+      notify('ZANDO Pro est synchronisé et prêt pour le mode hors ligne.', 'success');
+    },
+    [notify],
+  );
+
+  const resetAndResyncInitial = useCallback(async () => {
+    await clearInitialSyncForResync();
+    setInitialSyncRecord(null);
+    setSyncState(getSyncState());
+    notify('Synchronisation initiale réinitialisée.', 'info');
+  }, [notify]);
+
+  const markPendingSync = useCallback(() => {
+    setSyncState(incrementPendingSyncChanges());
+  }, []);
+
+  const runManualSync = useCallback(async () => {
+    if (!initialSyncRecord) return;
+    setSyncState((prev) => ({...prev, syncing: true, lastError: null}));
+    const entityDigests: Array<{id: string; updatedAt: number}> = [
+      ...products.map((p) => ({id: p.id, updatedAt: p.updatedAt})),
+      ...promotions.map((p) => ({id: p.id, updatedAt: p.updatedAt})),
+      ...customers.map((c) => ({id: c.id, updatedAt: c.updatedAt})),
+      ...sales.map((s) => ({id: s.id, updatedAt: s.createdAt})),
+      ...orders.map((o) => ({id: o.id, updatedAt: o.updatedAt})),
+      ...catalogs.map((c) => ({id: c.id, updatedAt: c.updatedAt ?? c.createdAt})),
+      ...expenses.map((e) => ({id: e.id, updatedAt: e.createdAt})),
+      ...creditTransactions.map((t) => ({id: t.id, updatedAt: t.createdAt})),
+    ];
+    const res = await runIncrementalSyncNonBlocking({
+      syncRecord: initialSyncRecord,
+      entityDigests,
+      stats: {
+        storeCount: storeSlots.length,
+        productsCount: products.length,
+        salesCount: sales.length,
+        ordersCount: orders.length,
+        customersCount: customers.length,
+      },
+    });
+    if (res.updatedRecord) {
+      setInitialSyncRecord(res.updatedRecord);
+    }
+    setSyncState(getSyncState());
+    if (res.ok) {
+      notify('Synchronisation et vérification locales à jour.', 'success');
+    } else if (res.error) {
+      notify(res.error, 'info');
+    }
+  }, [
+    initialSyncRecord,
+    products,
+    promotions,
+    customers,
+    sales,
+    orders,
+    catalogs,
+    expenses,
+    creditTransactions,
+    storeSlots.length,
+    notify,
+  ]);
+
+  // Synchronisation automatique discrète au retour d'Internet si des modifications locales attendent
+  useEffect(() => {
+    const handleOnline = () => {
+      if (initialSyncRecord && syncState.pendingChanges > 0) {
+        runManualSync().catch(() => {});
+      }
+    };
+    window.addEventListener('online', handleOnline);
+    return () => window.removeEventListener('online', handleOnline);
+  }, [initialSyncRecord, syncState.pendingChanges, runManualSync]);
 
   // Alerte unique à la fin du premier téléchargement complet du cache hors ligne
   useEffect(() => {
@@ -844,27 +948,33 @@ export const StoreProvider: React.FC<{children: React.ReactNode}> = ({children})
           setCatalogs(synced);
         }
       }
+      markPendingSync();
     },
-    [storeProfile.phone, catalogs, appMode, activeStoreId],
+    [storeProfile.phone, catalogs, appMode, activeStoreId, markPendingSync],
   );
 
-  const saveProduct = useCallback(async (product: Product) => {
-    await putRecord(STORES.PRODUCTS, product);
-    setProducts((prev) => {
-      const idx = prev.findIndex((p) => p.id === product.id);
-      if (idx >= 0) {
-        const copy = [...prev];
-        copy[idx] = product;
-        return copy.sort((a, b) => b.updatedAt - a.updatedAt);
-      }
-      return [product, ...prev];
-    });
-  }, []);
+  const saveProduct = useCallback(
+    async (product: Product) => {
+      await putRecord(STORES.PRODUCTS, product);
+      setProducts((prev) => {
+        const idx = prev.findIndex((p) => p.id === product.id);
+        if (idx >= 0) {
+          const copy = [...prev];
+          copy[idx] = product;
+          return copy.sort((a, b) => b.updatedAt - a.updatedAt);
+        }
+        return [product, ...prev];
+      });
+      markPendingSync();
+    },
+    [markPendingSync],
+  );
 
   const importProductsBatch = useCallback(
     async (items: Product[]) => {
       await bulkPutProducts(items);
       await reloadAll();
+      markPendingSync();
       pushAppNotification({
         category: 'stock',
         severity: 'success',
@@ -874,58 +984,79 @@ export const StoreProvider: React.FC<{children: React.ReactNode}> = ({children})
         actionLabel: 'Voir produits',
       });
     },
-    [reloadAll, pushAppNotification],
+    [reloadAll, pushAppNotification, markPendingSync],
   );
 
-  const removeProduct = useCallback(async (product: Product) => {
-    await deleteRecord(STORES.PRODUCTS, product.id);
-    if (product.imageBlobId) {
-      await deleteMediaBlob(product.imageBlobId);
-    }
-    setProducts((prev) => prev.filter((p) => p.id !== product.id));
-  }, []);
-
-  const savePromotion = useCallback(async (promo: Promotion) => {
-    await putRecord(STORES.PROMOTIONS, promo);
-    setPromotions((prev) => {
-      const idx = prev.findIndex((p) => p.id === promo.id);
-      if (idx >= 0) {
-        const copy = [...prev];
-        copy[idx] = promo;
-        return copy;
+  const removeProduct = useCallback(
+    async (product: Product) => {
+      await deleteRecord(STORES.PRODUCTS, product.id);
+      if (product.imageBlobId) {
+        await deleteMediaBlob(product.imageBlobId);
       }
-      return [promo, ...prev];
-    });
-  }, []);
+      setProducts((prev) => prev.filter((p) => p.id !== product.id));
+      markPendingSync();
+    },
+    [markPendingSync],
+  );
 
-  const removePromotion = useCallback(async (id: string) => {
-    await deleteRecord(STORES.PROMOTIONS, id);
-    setPromotions((prev) => prev.filter((p) => p.id !== id));
-  }, []);
+  const savePromotion = useCallback(
+    async (promo: Promotion) => {
+      await putRecord(STORES.PROMOTIONS, promo);
+      setPromotions((prev) => {
+        const idx = prev.findIndex((p) => p.id === promo.id);
+        if (idx >= 0) {
+          const copy = [...prev];
+          copy[idx] = promo;
+          return copy;
+        }
+        return [promo, ...prev];
+      });
+      markPendingSync();
+    },
+    [markPendingSync],
+  );
 
-  const saveCustomer = useCallback(async (customer: Customer) => {
-    await putRecord(STORES.CUSTOMERS, customer);
-    setCustomers((prev) => {
-      const idx = prev.findIndex((c) => c.id === customer.id);
-      if (idx >= 0) {
-        const copy = [...prev];
-        copy[idx] = customer;
-        return copy.sort((a, b) => b.updatedAt - a.updatedAt);
-      }
-      return [customer, ...prev];
-    });
-  }, []);
+  const removePromotion = useCallback(
+    async (id: string) => {
+      await deleteRecord(STORES.PROMOTIONS, id);
+      setPromotions((prev) => prev.filter((p) => p.id !== id));
+      markPendingSync();
+    },
+    [markPendingSync],
+  );
 
-  const removeCustomer = useCallback(async (id: string) => {
-    await deleteRecord(STORES.CUSTOMERS, id);
-    setCustomers((prev) => prev.filter((c) => c.id !== id));
-  }, []);
+  const saveCustomer = useCallback(
+    async (customer: Customer) => {
+      await putRecord(STORES.CUSTOMERS, customer);
+      setCustomers((prev) => {
+        const idx = prev.findIndex((c) => c.id === customer.id);
+        if (idx >= 0) {
+          const copy = [...prev];
+          copy[idx] = customer;
+          return copy.sort((a, b) => b.updatedAt - a.updatedAt);
+        }
+        return [customer, ...prev];
+      });
+      markPendingSync();
+    },
+    [markPendingSync],
+  );
+
+  const removeCustomer = useCallback(
+    async (id: string) => {
+      await deleteRecord(STORES.CUSTOMERS, id);
+      setCustomers((prev) => prev.filter((c) => c.id !== id));
+      markPendingSync();
+    },
+    [markPendingSync],
+  );
 
   const addSale = useCallback(
     async (sale: Sale) => {
       await recordSaleWithStockDeduction(sale);
       playSaleFeedbackBeep(proSettings.soundFeedback);
       await reloadAll();
+      markPendingSync();
 
       const unpaid = Math.max(0, sale.total - (sale.amountPaid ?? sale.total));
       if (unpaid > 0) {
@@ -939,13 +1070,17 @@ export const StoreProvider: React.FC<{children: React.ReactNode}> = ({children})
         });
       }
     },
-    [reloadAll, proSettings.soundFeedback, pushAppNotification, storeProfile.currency],
+    [reloadAll, proSettings.soundFeedback, pushAppNotification, storeProfile.currency, markPendingSync],
   );
 
-  const removeSale = useCallback(async (id: string) => {
-    await deleteRecord(STORES.SALES, id);
-    setSales((prev) => prev.filter((s) => s.id !== id));
-  }, []);
+  const removeSale = useCallback(
+    async (id: string) => {
+      await deleteRecord(STORES.SALES, id);
+      setSales((prev) => prev.filter((s) => s.id !== id));
+      markPendingSync();
+    },
+    [markPendingSync],
+  );
 
   const saveOrder = useCallback(
     async (order: Order) => {
@@ -960,6 +1095,7 @@ export const StoreProvider: React.FC<{children: React.ReactNode}> = ({children})
         }
         return [order, ...prev];
       });
+      markPendingSync();
       if (isNew) {
         pushAppNotification({
           category: 'order',
@@ -971,13 +1107,17 @@ export const StoreProvider: React.FC<{children: React.ReactNode}> = ({children})
         });
       }
     },
-    [orders, pushAppNotification, storeProfile.currency],
+    [orders, pushAppNotification, storeProfile.currency, markPendingSync],
   );
 
-  const removeOrder = useCallback(async (id: string) => {
-    await deleteRecord(STORES.ORDERS, id);
-    setOrders((prev) => prev.filter((o) => o.id !== id));
-  }, []);
+  const removeOrder = useCallback(
+    async (id: string) => {
+      await deleteRecord(STORES.ORDERS, id);
+      setOrders((prev) => prev.filter((o) => o.id !== id));
+      markPendingSync();
+    },
+    [markPendingSync],
+  );
 
   const completeOrderAsSale = useCallback(
     async (order: Order, paymentMethod: Sale['paymentMethod']) => {
@@ -1004,52 +1144,70 @@ export const StoreProvider: React.FC<{children: React.ReactNode}> = ({children})
       await convertOrderToSaleTransaction(order, sale);
       playSaleFeedbackBeep(proSettings.soundFeedback);
       await reloadAll();
+      markPendingSync();
     },
-    [reloadAll, proSettings.receiptPrefix, proSettings.soundFeedback],
+    [reloadAll, proSettings.receiptPrefix, proSettings.soundFeedback, markPendingSync],
   );
 
-  const saveCatalog = useCallback(async (catalog: SavedCatalog) => {
-    await putRecord(STORES.CATALOGS, catalog);
-    setCatalogs((prev) => {
-      const idx = prev.findIndex((c) => c.id === catalog.id);
-      if (idx >= 0) {
-        const copy = [...prev];
-        copy[idx] = catalog;
-        return copy;
-      }
-      return [catalog, ...prev];
-    });
-  }, []);
+  const saveCatalog = useCallback(
+    async (catalog: SavedCatalog) => {
+      await putRecord(STORES.CATALOGS, catalog);
+      setCatalogs((prev) => {
+        const idx = prev.findIndex((c) => c.id === catalog.id);
+        if (idx >= 0) {
+          const copy = [...prev];
+          copy[idx] = catalog;
+          return copy;
+        }
+        return [catalog, ...prev];
+      });
+      markPendingSync();
+    },
+    [markPendingSync],
+  );
 
-  const removeCatalog = useCallback(async (id: string) => {
-    await deleteRecord(STORES.CATALOGS, id);
-    setCatalogs((prev) => prev.filter((c) => c.id !== id));
-  }, []);
+  const removeCatalog = useCallback(
+    async (id: string) => {
+      await deleteRecord(STORES.CATALOGS, id);
+      setCatalogs((prev) => prev.filter((c) => c.id !== id));
+      markPendingSync();
+    },
+    [markPendingSync],
+  );
 
-  const saveExpense = useCallback(async (expense: Expense) => {
-    await putRecord(STORES.EXPENSES, expense);
-    setExpenses((prev) => {
-      const idx = prev.findIndex((e) => e.id === expense.id);
-      if (idx >= 0) {
-        const copy = [...prev];
-        copy[idx] = expense;
-        return copy.sort((a, b) => b.date.localeCompare(a.date) || b.createdAt - a.createdAt);
-      }
-      return [expense, ...prev].sort((a, b) => b.date.localeCompare(a.date) || b.createdAt - a.createdAt);
-    });
-  }, []);
+  const saveExpense = useCallback(
+    async (expense: Expense) => {
+      await putRecord(STORES.EXPENSES, expense);
+      setExpenses((prev) => {
+        const idx = prev.findIndex((e) => e.id === expense.id);
+        if (idx >= 0) {
+          const copy = [...prev];
+          copy[idx] = expense;
+          return copy.sort((a, b) => b.date.localeCompare(a.date) || b.createdAt - a.createdAt);
+        }
+        return [expense, ...prev].sort((a, b) => b.date.localeCompare(a.date) || b.createdAt - a.createdAt);
+      });
+      markPendingSync();
+    },
+    [markPendingSync],
+  );
 
-  const removeExpense = useCallback(async (id: string) => {
-    await deleteRecord(STORES.EXPENSES, id);
-    setExpenses((prev) => prev.filter((e) => e.id !== id));
-  }, []);
+  const removeExpense = useCallback(
+    async (id: string) => {
+      await deleteRecord(STORES.EXPENSES, id);
+      setExpenses((prev) => prev.filter((e) => e.id !== id));
+      markPendingSync();
+    },
+    [markPendingSync],
+  );
 
   const addCreditTransaction = useCallback(
     async (entry: CreditTransaction) => {
       await recordCreditLedgerEntry(entry);
       await reloadAll();
+      markPendingSync();
     },
-    [reloadAll],
+    [reloadAll, markPendingSync],
   );
 
   const askAssistant = useCallback(
@@ -1247,6 +1405,9 @@ export const StoreProvider: React.FC<{children: React.ReactNode}> = ({children})
       value={{
         loading,
         error,
+        syncChecking,
+        initialSyncRecord,
+        syncState,
         appMode,
         showOnboardingChoice,
         zandoDeviceId,
@@ -1274,6 +1435,9 @@ export const StoreProvider: React.FC<{children: React.ReactNode}> = ({children})
         isLocked,
         notify,
         dismissToast,
+        completeInitialSync,
+        runManualSync,
+        resetAndResyncInitial,
         pushAppNotification,
         markNotificationRead,
         markAllNotificationsRead,
