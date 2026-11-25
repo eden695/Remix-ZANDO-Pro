@@ -26,5 +26,23 @@
   <body class="bg-slate-50 text-slate-900 antialiased dark:bg-slate-950 dark:text-slate-100">
     <div id="root"></div>
     <script type="module" src="/src/main.tsx"></script>
+    <script>
+      (function () {
+        var timer = window.setTimeout(function () {
+          var root = document.getElementById('root');
+          if (!root || root.children.length > 0) return;
+          root.innerHTML =
+            '<div style="min-height:100vh;display:flex;flex-direction:column;align-items:center;justify-content:center;padding:24px;text-align:center;font-family:system-ui,-apple-system,sans-serif">' +
+            '<h1 style="font-size:18px;font-weight:700;margin:0 0 8px">ZANDO Pro</h1>' +
+            '<p style="font-size:14px;color:#64748b;margin:0 0 16px;max-width:340px">Le démarrage prend plus de temps que prévu sur ce WebView.</p>' +
+            '<button type="button" onclick="window.location.reload()" style="min-height:44px;padding:0 20px;border-radius:12px;border:none;background:#0f172a;color:#fff;font-weight:600;font-size:14px;cursor:pointer">Relancer</button>' +
+            '</div>';
+        }, 6000);
+        window.addEventListener('DOMContentLoaded', function () {
+          var root = document.getElementById('root');
+          if (root && root.children.length > 0) window.clearTimeout(timer);
+        });
+      })();
+    </script>
   </body>
 </html>

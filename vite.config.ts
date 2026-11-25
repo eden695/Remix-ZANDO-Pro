@@ -38,13 +38,6 @@ export default defineConfig(() => {
       tailwindcss(),
       VitePWA({
         registerType: 'autoUpdate',
-        includeAssets: [
-          'icon.svg',
-          'apple-touch-icon.png',
-          'pwa-192x192.png',
-          'pwa-512x512.png',
-          'pwa-maskable-512x512.png',
-        ],
         manifest: {
           id: base,
           name: 'ZANDO Pro — Gestion Commerciale Offline-First',
@@ -126,6 +119,14 @@ export default defineConfig(() => {
           navigateFallback: 'index.html',
         },
       }),
+      {
+        name: 'strip-crossorigin-for-relative-apk',
+        apply: 'build',
+        transformIndexHtml(html: string): string {
+          if (base !== './') return html;
+          return html.replace(/\s+crossorigin(?=[\s>])/gi, '');
+        },
+      },
       // Copies src/assets into dist/ so root-relative URLs like
       // "/src/assets/images/..." (e.g. generate_image output) still resolve
       // in production builds. Do not remove.

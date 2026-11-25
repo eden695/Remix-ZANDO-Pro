@@ -216,21 +216,75 @@ export function isPackagedOfflineProtocol(): boolean {
   );
 }
 
+function fetchWithTimeout(
+  input: RequestInfo | URL,
+  init: RequestInit = {},
+  timeoutMs = 2500,
+): Promise<Response> {
+  if (typeof AbortController === 'undefined') {
+    return fetch(input, init);
+  }
+  const controller = new AbortController();
+  const timer = window.setTimeout(() => controller.abort(), timeoutMs);
+  return fetch(input, {...init, signal: controller.signal}).finally(() => {
+    window.clearTimeout(timer);
+  });
+}
+
 function openSyncIdb(): Promise<IDBDatabase> {
   return new Promise((resolve, reject) => {
     if (typeof indexedDB === 'undefined') {
       reject(new Error('IndexedDB indisponible sur cet appareil.'));
       return;
     }
-    const req = indexedDB.open(SYNC_IDB_NAME, 1);
+    let settled = false;
+    const timer = window.setTimeout(() => {
+      if (settled) return;
+      settled = true;
+      reject(new Error('Délai d’ouverture de la base de synchronisation dépassé.'));
+    }, 2000);
+
+    let req: IDBOpenDBRequest;
+    try {
+      req = indexedDB.open(SYNC_IDB_NAME, 1);
+    } catch (err) {
+      window.clearTimeout(timer);
+      reject(err);
+      return;
+    }
+
+    req.onblocked = () => {
+      if (settled) return;
+      settled = true;
+      window.clearTimeout(timer);
+      reject(new Error('Base de synchronisation temporairement verrouillée.'));
+    };
+
     req.onupgradeneeded = () => {
       const db = req.result;
       if (!db.objectStoreNames.contains(SYNC_IDB_STORE)) {
         db.createObjectStore(SYNC_IDB_STORE);
       }
     };
-    req.onsuccess = () => resolve(req.result);
-    req.onerror = () => reject(req.error || new Error('Ouverture de la base de synchronisation impossible.'));
+    req.onsuccess = () => {
+      if (settled) {
+        try {
+          req.result.close();
+        } catch {
+          // Ignore
+        }
+        return;
+      }
+      settled = true;
+      window.clearTimeout(timer);
+      resolve(req.result);
+    };
+    req.onerror = () => {
+      if (settled) return;
+      settled = true;
+      window.clearTimeout(timer);
+      reject(req.error || new Error('Ouverture de la base de synchronisation impossible.'));
+    };
   });
 }
 
@@ -328,13 +382,20 @@ export async function readCompletedInitialSync(): Promise<InitialSyncRecord | nu
   return winner;
 }
 
-export async function ensureOfflineFirstSyncRecord(): Promise<InitialSyncRecord> {
-  const existing = await readCompletedInitialSync();
-  if (existing) return existing;
+export function ensureOfflineFirstSyncRecordFast(): InitialSyncRecord {
+  try {
+    const raw = localStorage.getItem(LS_SYNC_RECORD_KEY);
+    if (raw) {
+      const parsed = JSON.parse(raw);
+      if (isValidInitialSyncRecord(parsed)) {
+        return parsed;
+      }
+    }
+  } catch {
+    // Fallback to static build
+  }
 
   const {bundle, bundleSha256} = buildStaticBootstrapBundle();
-  await saveSyncedBundleData(bundle);
-
   const currentPro = getProAppSettings();
   if (!currentPro.receiptFooter) {
     saveProAppSettings({
@@ -372,11 +433,29 @@ export async function ensureOfflineFirstSyncRecord(): Promise<InitialSyncRecord>
   };
 
   try {
-    await saveCompletedInitialSync(localRecord);
+    localStorage.setItem(LS_SYNC_RECORD_KEY, JSON.stringify(localRecord));
+    localStorage.setItem(LS_BUNDLE_KEY, JSON.stringify(bundle));
   } catch {
-    // Continuer même si le stockage local est restreint
+    // Ignore storage quota issues
   }
+
+  // Miroir silencieux vers IndexedDB sans jamais bloquer le démarrage de l'interface
+  void idbPut(SYNC_BUNDLE_KEY, bundle);
+  void idbPut(SYNC_RECORD_KEY, localRecord);
+
   return localRecord;
+}
+
+export async function ensureOfflineFirstSyncRecord(): Promise<InitialSyncRecord> {
+  const fast = ensureOfflineFirstSyncRecordFast();
+  // Tente une synchro silencieuse IDB -> localStorage si IDB répond vite, sans bloquer
+  try {
+    const existing = await readCompletedInitialSync();
+    if (existing) return existing;
+  } catch {
+    // Ignoré
+  }
+  return fast;
 }
 
 async function saveCompletedInitialSync(record: InitialSyncRecord): Promise<void> {
@@ -495,7 +574,7 @@ async function verifyLocalFileReadable(relativeUrl: string): Promise<boolean> {
 
   if (typeof fetch !== 'undefined') {
     try {
-      const res = await fetch(clean);
+      const res = await fetchWithTimeout(clean, {}, 2500);
       if (res.ok) {
         const buf = await res.arrayBuffer();
         if (buf.byteLength > 0) return true;
@@ -547,7 +626,7 @@ async function verifyOrDownloadAsset(
   }
 
   // En environnement Web / PWA (GitHub Pages ou serveur) : télécharger, vérifier & stocker en CacheStorage
-  const res = await fetch(localUrl, {cache: 'no-cache'});
+  const res = await fetchWithTimeout(localUrl, {cache: 'no-cache'}, 4000);
   if (!res.ok) {
     throw new Error(`Échec du téléchargement de la ressource obligatoire : ${asset.name}`);
   }
@@ -664,7 +743,11 @@ export async function checkSyncServerAvailability(): Promise<{
 
   if (origin) {
     try {
-      const res = await fetch(`${origin}/api/sync/manifest?t=${Date.now()}`, {cache: 'no-store'});
+      const res = await fetchWithTimeout(
+        `${origin}/api/sync/manifest?t=${Date.now()}`,
+        {cache: 'no-store'},
+        2500,
+      );
       const contentType = res.headers.get('content-type') || '';
       if (res.ok && contentType.includes('application/json')) {
         const manifest = (await res.json()) as ManifestResponse;
@@ -694,7 +777,7 @@ export async function checkSyncServerAvailability(): Promise<{
   // Hébergement statique (GitHub Pages *.github.io, domaine personnalisé GitHub Pages, ou APK)
   if (!isPackagedOfflineProtocol()) {
     try {
-      const probeRes = await fetch(`./icon.svg?t=${Date.now()}`, {cache: 'no-store'});
+      const probeRes = await fetchWithTimeout(`./icon.svg?t=${Date.now()}`, {cache: 'no-store'}, 2500);
       if (!probeRes.ok) {
         return {
           reachable: false,
@@ -824,7 +907,7 @@ export async function runInitialSync(params: {
     );
     for (const u of shellUrls) {
       try {
-        const res = await fetch(u);
+        const res = await fetchWithTimeout(u, {}, 2500);
         if (res.ok) await cache.put(u, res);
       } catch {
         // Non bloquant si ressource absente en mode développement
@@ -866,9 +949,11 @@ export async function runInitialSync(params: {
       bundleData = staticPayload.bundle;
       bundleSha256 = staticPayload.bundleSha256;
     } else {
-      const dataRes = await fetch(`${probe.origin}/api/sync/bootstrap-data?t=${Date.now()}`, {
-        cache: 'no-store',
-      });
+      const dataRes = await fetchWithTimeout(
+        `${probe.origin}/api/sync/bootstrap-data?t=${Date.now()}`,
+        {cache: 'no-store'},
+        4000,
+      );
       if (!dataRes.ok) {
         throw new Error('Impossible de télécharger le paquet de données initiales.');
       }
@@ -1051,16 +1136,20 @@ export async function runIncrementalSyncNonBlocking(params: {
   }
 
   try {
-    const res = await fetch(`${origin}/api/sync/exchange`, {
-      method: 'POST',
-      headers: {'Content-Type': 'application/json'},
-      body: JSON.stringify({
-        deviceId: params.syncRecord.deviceId,
-        appVersion: APP_VERSION,
-        entityDigests: params.entityDigests.slice(0, 500),
-        stats: params.stats,
-      }),
-    });
+    const res = await fetchWithTimeout(
+      `${origin}/api/sync/exchange`,
+      {
+        method: 'POST',
+        headers: {'Content-Type': 'application/json'},
+        body: JSON.stringify({
+          deviceId: params.syncRecord.deviceId,
+          appVersion: APP_VERSION,
+          entityDigests: params.entityDigests.slice(0, 500),
+          stats: params.stats,
+        }),
+      },
+      5000,
+    );
 
     const contentType = res.headers.get('content-type') || '';
     if (!explicitRemote && !contentType.includes('application/json')) {

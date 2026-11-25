@@ -29,6 +29,7 @@ import {
 import {
   clearInitialSyncForResync,
   ensureOfflineFirstSyncRecord,
+  ensureOfflineFirstSyncRecordFast,
   getSyncState,
   incrementPendingSyncChanges,
   readCompletedInitialSync,
@@ -220,11 +221,20 @@ const StoreContext = createContext<StoreContextValue | null>(null);
 export const StoreProvider: React.FC<{children: React.ReactNode}> = ({children}) => {
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
-  const [syncChecking, setSyncChecking] = useState(true);
+  const [syncChecking, setSyncChecking] = useState(false);
   const [syncScreenOpen, setSyncScreenOpen] = useState(false);
-  const [initialSyncRecord, setInitialSyncRecord] = useState<InitialSyncRecord | null>(null);
+  const [initialSyncRecord, setInitialSyncRecord] = useState<InitialSyncRecord | null>(() =>
+    ensureOfflineFirstSyncRecordFast(),
+  );
   const [syncState, setSyncState] = useState<SyncState>(() => getSyncState());
-  const [appMode, setAppMode] = useState<AppMode>(() => getStoredAppMode());
+  const [appMode, setAppMode] = useState<AppMode>(() => {
+    const mode = getStoredAppMode();
+    if (mode === 'unset') {
+      setStoredAppMode('real');
+      return 'real';
+    }
+    return mode;
+  });
   const [showOnboardingChoice, setShowOnboardingChoice] = useState(false);
   const [zandoDeviceId] = useState<string>(() => getOrCreateZandoDeviceId());
   const [storeSlots, setStoreSlots] = useState<StoreSlot[]>(() => getStoreSlots());
@@ -405,47 +415,65 @@ export const StoreProvider: React.FC<{children: React.ReactNode}> = ({children})
   // Boot 100% offline-first: zero blocking network requirement at first launch or offline startup
   useEffect(() => {
     let active = true;
+    let backgroundSyncTimer: number | undefined;
+
+    // Garde-fou absolu : aucun écran de chargement ne doit rester bloqué indéfiniment sur WebView Android
+    const bootWatchdog = window.setTimeout(() => {
+      if (active) {
+        setSyncChecking(false);
+        setLoading(false);
+      }
+    }, 5500);
+
     (async () => {
-      let currentRec: InitialSyncRecord | null = null;
-      try {
-        const existing = await readCompletedInitialSync();
-        currentRec = existing || (await ensureOfflineFirstSyncRecord());
-        if (!active) return;
-        setInitialSyncRecord(currentRec);
-        setSyncState(getSyncState());
-      } finally {
-        if (active) setSyncChecking(false);
-      }
-
-      const storedMode = getStoredAppMode();
-      if (storedMode === 'unset') {
-        if (!active) return;
-        setStoredAppMode('real');
-        setAppMode('real');
-        setShowOnboardingChoice(false);
-      }
       await reloadAll();
+      if (!active) return;
+      window.clearTimeout(bootWatchdog);
 
-      // Mise en cache silencieuse en arrière-plan dès que Internet est disponible (sans jamais bloquer l'utilisateur)
-      if (
-        active &&
-        typeof navigator !== 'undefined' &&
-        navigator.onLine !== false &&
-        (!currentRec || !currentRec.storagePersisted)
-      ) {
-        runInitialSync({})
-          .then((verifiedRec) => {
+      // Réconciliation silencieuse IDB sync + mise en cache en arrière-plan après affichage complet de l'UI
+      backgroundSyncTimer = window.setTimeout(() => {
+        if (!active) return;
+        readCompletedInitialSync()
+          .then((existing) => {
+            if (!active) return existing;
+            if (existing) {
+              setInitialSyncRecord(existing);
+              setSyncState(getSyncState());
+            }
+            return existing;
+          })
+          .then((existing) => {
             if (!active) return;
-            setInitialSyncRecord(verifiedRec);
-            setSyncState(getSyncState());
+            const currentRec = existing || ensureOfflineFirstSyncRecordFast();
+            if (
+              typeof navigator !== 'undefined' &&
+              navigator.onLine !== false &&
+              !currentRec.storagePersisted
+            ) {
+              return runInitialSync({})
+                .then((verifiedRec) => {
+                  if (!active) return;
+                  setInitialSyncRecord(verifiedRec);
+                  setSyncState(getSyncState());
+                })
+                .catch(() => {
+                  // Silencieux : l'application reste pleinement utilisable hors ligne
+                });
+            }
+            return undefined;
           })
           .catch(() => {
-            // Silencieux : l'application reste pleinement utilisable hors ligne
+            // Silencieux : les données locales sont déjà opérationnelles
           });
-      }
+      }, 2200);
     })();
+
     return () => {
       active = false;
+      window.clearTimeout(bootWatchdog);
+      if (backgroundSyncTimer !== undefined) {
+        window.clearTimeout(backgroundSyncTimer);
+      }
     };
   }, [reloadAll]);
 

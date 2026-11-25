@@ -331,7 +331,40 @@ export function openZandoDB(explicitDbName?: string): Promise<IDBDatabase> {
       return;
     }
 
-    const request = indexedDB.open(targetName, CURRENT_SCHEMA_VERSION);
+    let settled = false;
+    let dbInstance: IDBDatabase | null = null;
+    const clearAndReject = (err: unknown) => {
+      if (settled) return;
+      settled = true;
+      window.clearTimeout(timeoutId);
+      dbCache.delete(targetName);
+      if (dbInstance) {
+        try {
+          dbInstance.close();
+        } catch {
+          // Ignore
+        }
+      }
+      reject(err instanceof Error ? err : new Error(String(err || "Impossible d'ouvrir IndexedDB.")));
+    };
+
+    const timeoutId = window.setTimeout(() => {
+      clearAndReject(new Error('Délai d’ouverture IndexedDB dépassé sur cet appareil.'));
+    }, 4000);
+
+    let request: IDBOpenDBRequest;
+    try {
+      request = indexedDB.open(targetName, CURRENT_SCHEMA_VERSION);
+    } catch (err) {
+      clearAndReject(err);
+      return;
+    }
+
+    request.onblocked = () => {
+      clearAndReject(
+        new Error('Base locale temporairement occupée par une autre session WebView.'),
+      );
+    };
 
     request.onupgradeneeded = (event) => {
       const db = request.result;
@@ -374,22 +407,38 @@ export function openZandoDB(explicitDbName?: string): Promise<IDBDatabase> {
 
     request.onsuccess = async () => {
       const db = request.result;
+      dbInstance = db;
       db.onversionchange = () => {
-        db.close();
+        try {
+          db.close();
+        } catch {
+          // Ignore
+        }
         dbCache.delete(targetName);
       };
       try {
         await ensureSchemaMetaAndDefaults(db);
+        if (settled) {
+          try {
+            db.close();
+          } catch {
+            // Ignore
+          }
+          return;
+        }
+        settled = true;
+        window.clearTimeout(timeoutId);
         requestPersistentStorage();
         resolve(db);
       } catch (err) {
-        reject(err);
+        clearAndReject(err);
       }
     };
 
     request.onerror = () => {
-      dbCache.delete(targetName);
-      reject(request.error ?? new Error("Impossible d'ouvrir la base locale IndexedDB."));
+      clearAndReject(
+        request.error ?? new Error("Impossible d'ouvrir la base locale IndexedDB."),
+      );
     };
   });
 
@@ -517,8 +566,21 @@ async function ensureSchemaMetaAndDefaults(db: IDBDatabase): Promise<void> {
   }
 
   await new Promise<void>((resolve, reject) => {
-    tx.oncomplete = () => resolve();
-    tx.onerror = () => reject(tx.error);
+    const txTimer = window.setTimeout(() => {
+      reject(new Error('Délai d’initialisation du schéma local dépassé.'));
+    }, 3000);
+    tx.oncomplete = () => {
+      window.clearTimeout(txTimer);
+      resolve();
+    };
+    tx.onerror = () => {
+      window.clearTimeout(txTimer);
+      reject(tx.error ?? new Error('Erreur de transaction IndexedDB.'));
+    };
+    tx.onabort = () => {
+      window.clearTimeout(txTimer);
+      reject(tx.error ?? new Error('Transaction IndexedDB interrompue.'));
+    };
   });
 }
 
@@ -817,7 +879,7 @@ export async function getStorageDiagnostics(): Promise<StorageDiagnostic> {
   };
 }
 
-export async function loadAllDomainData(): Promise<{
+async function loadAllDomainDataOnce(): Promise<{
   storeProfile: StoreProfile;
   products: Product[];
   promotions: Promotion[];
@@ -835,6 +897,21 @@ export async function loadAllDomainData(): Promise<{
   const allStores = Object.values(STORES);
   const tx = db.transaction(allStores, 'readonly');
 
+  const readsPromise = Promise.all([
+    idbReq<StoreProfile[]>(tx.objectStore(STORES.STORE_PROFILE).getAll()),
+    idbReq<MediaBlobRecord[]>(tx.objectStore(STORES.MEDIA_BLOBS).getAll()),
+    idbReq<Product[]>(tx.objectStore(STORES.PRODUCTS).getAll()),
+    idbReq<Promotion[]>(tx.objectStore(STORES.PROMOTIONS).getAll()),
+    idbReq<Customer[]>(tx.objectStore(STORES.CUSTOMERS).getAll()),
+    idbReq<Sale[]>(tx.objectStore(STORES.SALES).getAll()),
+    idbReq<Order[]>(tx.objectStore(STORES.ORDERS).getAll()),
+    idbReq<SavedCatalog[]>(tx.objectStore(STORES.CATALOGS).getAll()),
+    idbReq<Expense[]>(tx.objectStore(STORES.EXPENSES).getAll()),
+    idbReq<CreditTransaction[]>(tx.objectStore(STORES.CREDIT_TRANSACTIONS).getAll()),
+    idbReq<AssistantMessage[]>(tx.objectStore(STORES.ASSISTANT_MESSAGES).getAll()),
+    idbReq<SchemaMeta[]>(tx.objectStore(STORES.SCHEMA_META).getAll()),
+  ]);
+
   const [
     profiles,
     mediaBlobs,
@@ -848,19 +925,13 @@ export async function loadAllDomainData(): Promise<{
     creditTransactions,
     assistantMessages,
     metas,
-  ] = await Promise.all([
-    idbReq<StoreProfile[]>(tx.objectStore(STORES.STORE_PROFILE).getAll()),
-    idbReq<MediaBlobRecord[]>(tx.objectStore(STORES.MEDIA_BLOBS).getAll()),
-    idbReq<Product[]>(tx.objectStore(STORES.PRODUCTS).getAll()),
-    idbReq<Promotion[]>(tx.objectStore(STORES.PROMOTIONS).getAll()),
-    idbReq<Customer[]>(tx.objectStore(STORES.CUSTOMERS).getAll()),
-    idbReq<Sale[]>(tx.objectStore(STORES.SALES).getAll()),
-    idbReq<Order[]>(tx.objectStore(STORES.ORDERS).getAll()),
-    idbReq<SavedCatalog[]>(tx.objectStore(STORES.CATALOGS).getAll()),
-    idbReq<Expense[]>(tx.objectStore(STORES.EXPENSES).getAll()),
-    idbReq<CreditTransaction[]>(tx.objectStore(STORES.CREDIT_TRANSACTIONS).getAll()),
-    idbReq<AssistantMessage[]>(tx.objectStore(STORES.ASSISTANT_MESSAGES).getAll()),
-    idbReq<SchemaMeta[]>(tx.objectStore(STORES.SCHEMA_META).getAll()),
+  ] = await Promise.race([
+    readsPromise,
+    new Promise<never>((_, reject) => {
+      window.setTimeout(() => {
+        reject(new Error('Délai de lecture de la base locale dépassé.'));
+      }, 4000);
+    }),
   ]);
 
   return {
@@ -883,4 +954,14 @@ export async function loadAllDomainData(): Promise<{
       migrations: [],
     },
   };
+}
+
+export async function loadAllDomainData() {
+  try {
+    return await loadAllDomainDataOnce();
+  } catch {
+    // Une seule nouvelle tentative après réinitialisation du cache de connexion si le WebView était temporairement verrouillé
+    await closeAndClearDbCache();
+    return loadAllDomainDataOnce();
+  }
 }
