@@ -83,21 +83,6 @@ export default defineConfig(() => {
           ignoreURLParametersMatching: [/.*/],
           runtimeCaching: [
             {
-              urlPattern: ({sameOrigin, request}) => sameOrigin && request.mode === 'navigate',
-              handler: 'NetworkFirst',
-              options: {
-                cacheName: 'zando-pages-runtime',
-                networkTimeoutSeconds: 2,
-                cacheableResponse: {
-                  statuses: [0, 200],
-                },
-                expiration: {
-                  maxEntries: 20,
-                  maxAgeSeconds: 60 * 60 * 24 * 365,
-                },
-              },
-            },
-            {
               urlPattern: ({sameOrigin, request}) => sameOrigin && request.mode !== 'navigate',
               handler: 'CacheFirst',
               options: {

@@ -249,34 +249,12 @@ const ZandoShell: React.FC = () => {
   const consumeQuickSaleTrigger = useCallback(() => setQuickSaleTrigger(0), []);
   const consumeQuickProductTrigger = useCallback(() => setQuickProductTrigger(0), []);
 
-  if (syncChecking) {
-    return (
-      <div className="min-h-screen flex flex-col items-center justify-center bg-slate-50 dark:bg-slate-950 p-6 gap-4">
-        <ZandoLogo />
-        <p className="text-sm text-slate-600 dark:text-slate-400">
-          Vérification de la synchronisation locale...
-        </p>
-      </div>
-    );
-  }
-
   if (syncScreenOpen) {
     return (
       <>
         <InitialSyncScreen onSyncCompleted={completeInitialSync} onCancel={closeSyncScreen} />
         <ToastBanner />
       </>
-    );
-  }
-
-  if (loading) {
-    return (
-      <div className="min-h-screen flex flex-col items-center justify-center bg-slate-50 dark:bg-slate-950 p-6 gap-4">
-        <ZandoLogo />
-        <p className="text-sm text-slate-600 dark:text-slate-400">
-          Ouverture de votre espace local IndexedDB...
-        </p>
-      </div>
     );
   }
 
@@ -291,7 +269,9 @@ const ZandoShell: React.FC = () => {
           <p className="text-sm text-slate-600 dark:text-slate-400">{error}</p>
           <button
             type="button"
-            onClick={reloadAll}
+            onClick={() => {
+              void reloadAll();
+            }}
             className="min-h-[44px] px-5 rounded-xl bg-slate-900 dark:bg-white text-white dark:text-slate-900 text-sm font-semibold cursor-pointer"
           >
             Réessayer

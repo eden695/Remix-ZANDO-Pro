@@ -306,6 +306,61 @@ export function getActiveDatabaseName(): string {
   return getActiveStoreSlot().dbName;
 }
 
+const PROFILE_SNAPSHOT_PREFIX = 'zando_pro_profile_snap_v1_';
+
+export function getCachedStoreProfileSnapshot(explicitDbName?: string): StoreProfile {
+  const dbName = explicitDbName ?? getActiveDatabaseName();
+  try {
+    const raw = localStorage.getItem(`${PROFILE_SNAPSHOT_PREFIX}${dbName}`);
+    if (raw) {
+      const parsed = JSON.parse(raw) as Partial<StoreProfile>;
+      if (parsed && typeof parsed.name === 'string') {
+        return {...DEFAULT_STORE_PROFILE, ...parsed, id: 'default'};
+      }
+    }
+  } catch {
+    // Ignore storage issues
+  }
+  const slot = getActiveStoreSlot();
+  if (dbName !== DEMO_DB_NAME && slot) {
+    return {
+      ...DEFAULT_STORE_PROFILE,
+      name: slot.name || DEFAULT_STORE_PROFILE.name,
+      currency: slot.currency || DEFAULT_STORE_PROFILE.currency,
+    };
+  }
+  return DEFAULT_STORE_PROFILE;
+}
+
+export function saveCachedStoreProfileSnapshot(
+  profile: StoreProfile,
+  explicitDbName?: string,
+): void {
+  const dbName = explicitDbName ?? getActiveDatabaseName();
+  try {
+    localStorage.setItem(
+      `${PROFILE_SNAPSHOT_PREFIX}${dbName}`,
+      JSON.stringify({
+        name: profile.name,
+        description: profile.description,
+        phone: profile.phone,
+        email: profile.email,
+        address: profile.address,
+        currency: profile.currency,
+        primaryColor: profile.primaryColor,
+        accentColor: profile.accentColor,
+        themeMode: profile.themeMode,
+        layoutMode: profile.layoutMode,
+        logoBlobId: profile.logoBlobId,
+        bannerBlobId: profile.bannerBlobId,
+        updatedAt: profile.updatedAt,
+      }),
+    );
+  } catch {
+    // Ignore quota issues
+  }
+}
+
 function ensureStore(
   db: IDBDatabase,
   name: string,

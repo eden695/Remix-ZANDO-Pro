@@ -11,6 +11,7 @@ import {
   DEMO_DB_NAME,
   getActiveStoreId,
   getActiveStoreSlot,
+  getCachedStoreProfileSnapshot,
   getStoredAppMode,
   getStoreSlots,
   isStoreSlotEmpty,
@@ -20,6 +21,7 @@ import {
   putRecord,
   recordCreditLedgerEntry,
   recordSaleWithStockDeduction,
+  saveCachedStoreProfileSnapshot,
   setActiveStoreId,
   setStoredAppMode,
   STORES,
@@ -219,7 +221,7 @@ interface StoreContextValue {
 const StoreContext = createContext<StoreContextValue | null>(null);
 
 export const StoreProvider: React.FC<{children: React.ReactNode}> = ({children}) => {
-  const [loading, setLoading] = useState(true);
+  const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [syncChecking, setSyncChecking] = useState(false);
   const [syncScreenOpen, setSyncScreenOpen] = useState(false);
@@ -253,7 +255,9 @@ export const StoreProvider: React.FC<{children: React.ReactNode}> = ({children})
   });
   const lastActivityRef = useRef<number>(Date.now());
 
-  const [storeProfile, setStoreProfile] = useState<StoreProfile>(DEFAULT_STORE_PROFILE);
+  const [storeProfile, setStoreProfile] = useState<StoreProfile>(() =>
+    getCachedStoreProfileSnapshot(),
+  );
   const [products, setProducts] = useState<Product[]>([]);
   const [promotions, setPromotions] = useState<Promotion[]>([]);
   const [customers, setCustomers] = useState<Customer[]>([]);
@@ -386,11 +390,12 @@ export const StoreProvider: React.FC<{children: React.ReactNode}> = ({children})
     });
   }, []);
 
-  const reloadAll = useCallback(async () => {
+  const reloadAllInternal = useCallback(async (opts?: {silent?: boolean}): Promise<boolean> => {
     try {
       setError(null);
       const data = await loadAllDomainData();
       setStoreProfile(data.storeProfile);
+      saveCachedStoreProfileSnapshot(data.storeProfile);
       setProducts(data.products);
       setPromotions(data.promotions);
       setCustomers(data.customers);
@@ -401,34 +406,42 @@ export const StoreProvider: React.FC<{children: React.ReactNode}> = ({children})
       setCreditTransactions(data.creditTransactions);
       setAssistantMessages(data.assistantMessages);
       setSchemaMeta(data.schemaMeta);
+      return true;
     } catch (err) {
-      setError(
-        err instanceof Error
-          ? err.message
-          : 'Erreur lors du chargement de la base locale IndexedDB.',
-      );
+      if (!opts?.silent) {
+        setError(
+          err instanceof Error
+            ? err.message
+            : 'Erreur lors du chargement de la base locale IndexedDB.',
+        );
+      }
+      return false;
     } finally {
       setLoading(false);
     }
   }, []);
 
-  // Boot 100% offline-first: zero blocking network requirement at first launch or offline startup
+  const reloadAll = useCallback(async (): Promise<void> => {
+    await reloadAllInternal();
+  }, [reloadAllInternal]);
+
+  // Boot 100% offline-first: zero blocking screen, immediate Dashboard render + silent IDB hydration
   useEffect(() => {
     let active = true;
+    let retryTimer: number | undefined;
     let backgroundSyncTimer: number | undefined;
 
-    // Garde-fou absolu : aucun écran de chargement ne doit rester bloqué indéfiniment sur WebView Android
-    const bootWatchdog = window.setTimeout(() => {
-      if (active) {
-        setSyncChecking(false);
-        setLoading(false);
-      }
-    }, 5500);
-
     (async () => {
-      await reloadAll();
+      const ok = await reloadAllInternal({silent: true});
       if (!active) return;
-      window.clearTimeout(bootWatchdog);
+
+      if (!ok) {
+        // Sur WebView Android au démarrage à froid, IndexedDB peut demander une brève seconde d'initialisation
+        retryTimer = window.setTimeout(() => {
+          if (!active) return;
+          void reloadAllInternal();
+        }, 650);
+      }
 
       // Réconciliation silencieuse IDB sync + mise en cache en arrière-plan après affichage complet de l'UI
       backgroundSyncTimer = window.setTimeout(() => {
@@ -470,12 +483,14 @@ export const StoreProvider: React.FC<{children: React.ReactNode}> = ({children})
 
     return () => {
       active = false;
-      window.clearTimeout(bootWatchdog);
+      if (retryTimer !== undefined) {
+        window.clearTimeout(retryTimer);
+      }
       if (backgroundSyncTimer !== undefined) {
         window.clearTimeout(backgroundSyncTimer);
       }
     };
-  }, [reloadAll]);
+  }, [reloadAllInternal]);
 
   const completeInitialSync = useCallback(
     (record: InitialSyncRecord) => {
@@ -985,6 +1000,7 @@ export const StoreProvider: React.FC<{children: React.ReactNode}> = ({children})
       const updated = {...next, id: 'default' as const, updatedAt: Date.now()};
       await putRecord(STORES.STORE_PROFILE, updated);
       setStoreProfile(updated);
+      saveCachedStoreProfileSnapshot(updated);
 
       if (appMode !== 'demo') {
         updateStoreSlotMeta(activeStoreId, updated.name, updated.currency);

@@ -122,5 +122,16 @@ if (
   }
 }
 
+(window as unknown as {__zandoBootOk?: boolean}).__zandoBootOk = true;
+if (typeof window !== 'undefined') {
+  window.setTimeout(() => {
+    try {
+      window.sessionStorage.removeItem('zando_cold_sw_retry_v1');
+    } catch {
+      // Ignore
+    }
+  }, 3000);
+}
+
 createRoot(document.getElementById('root')!).render(<App />);
 

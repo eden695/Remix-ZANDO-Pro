@@ -22,26 +22,79 @@
     <meta name="apple-mobile-web-app-title" content="ZANDO Pro" />
     <link rel="apple-touch-icon" href="%BASE_URL%apple-touch-icon.png" />
     <link rel="icon" type="image/svg+xml" href="%BASE_URL%icon.svg" />
+    <script>
+      (function () {
+        window.__zandoBootOk = false;
+        var recovering = false;
+        var RETRY_KEY = 'zando_cold_sw_retry_v1';
+
+        function showFallbackUi() {
+          var root = document.getElementById('root');
+          if (!root || root.children.length > 0 || window.__zandoBootOk) return;
+          root.innerHTML =
+            '<div style="min-height:100vh;display:flex;flex-direction:column;align-items:center;justify-content:center;padding:24px;text-align:center;font-family:system-ui,-apple-system,sans-serif">' +
+            '<h1 style="font-size:18px;font-weight:700;margin:0 0 8px">ZANDO Pro</h1>' +
+            '<p style="font-size:14px;color:#64748b;margin:0 0 16px;max-width:340px">Le démarrage hors ligne a été interrompu par le cache du navigateur.</p>' +
+            '<button type="button" onclick="window.location.replace(window.location.href)" style="min-height:44px;padding:0 20px;border-radius:12px;border:none;background:#0f172a;color:#fff;font-weight:600;font-size:14px;cursor:pointer">Ouvrir ZANDO Pro</button>' +
+            '</div>';
+        }
+
+        function recoverColdBoot() {
+          if (window.__zandoBootOk || recovering) return;
+          recovering = true;
+          try {
+            if (window.sessionStorage.getItem(RETRY_KEY) === '1') {
+              showFallbackUi();
+              return;
+            }
+            window.sessionStorage.setItem(RETRY_KEY, '1');
+          } catch (e) {
+            showFallbackUi();
+            return;
+          }
+          var reloadNow = function () {
+            window.location.replace(window.location.href);
+          };
+          if (navigator && navigator.serviceWorker && navigator.serviceWorker.ready) {
+            Promise.race([
+              navigator.serviceWorker.ready,
+              new Promise(function (resolve) {
+                window.setTimeout(resolve, 900);
+              }),
+            ]).then(reloadNow, reloadNow);
+          } else {
+            window.setTimeout(reloadNow, 300);
+          }
+        }
+
+        window.__zandoRecoverColdBoot = recoverColdBoot;
+        window.addEventListener(
+          'error',
+          function (evt) {
+            if (window.__zandoBootOk) return;
+            var target = evt && evt.target;
+            if (!target || (target.tagName !== 'SCRIPT' && target.tagName !== 'LINK')) return;
+            var src = target.src || target.href || '';
+            if (src.indexOf('assets/') !== -1) {
+              recoverColdBoot();
+            }
+          },
+          true,
+        );
+      })();
+    </script>
   </head>
   <body class="bg-slate-50 text-slate-900 antialiased dark:bg-slate-950 dark:text-slate-100">
     <div id="root"></div>
     <script type="module" src="/src/main.tsx"></script>
     <script>
       (function () {
-        var timer = window.setTimeout(function () {
+        window.setTimeout(function () {
           var root = document.getElementById('root');
-          if (!root || root.children.length > 0) return;
-          root.innerHTML =
-            '<div style="min-height:100vh;display:flex;flex-direction:column;align-items:center;justify-content:center;padding:24px;text-align:center;font-family:system-ui,-apple-system,sans-serif">' +
-            '<h1 style="font-size:18px;font-weight:700;margin:0 0 8px">ZANDO Pro</h1>' +
-            '<p style="font-size:14px;color:#64748b;margin:0 0 16px;max-width:340px">Le démarrage prend plus de temps que prévu sur ce WebView.</p>' +
-            '<button type="button" onclick="window.location.reload()" style="min-height:44px;padding:0 20px;border-radius:12px;border:none;background:#0f172a;color:#fff;font-weight:600;font-size:14px;cursor:pointer">Relancer</button>' +
-            '</div>';
-        }, 6000);
-        window.addEventListener('DOMContentLoaded', function () {
-          var root = document.getElementById('root');
-          if (root && root.children.length > 0) window.clearTimeout(timer);
-        });
+          if (!window.__zandoBootOk && (!root || root.children.length === 0)) {
+            if (window.__zandoRecoverColdBoot) window.__zandoRecoverColdBoot();
+          }
+        }, 1800);
       })();
     </script>
   </body>
