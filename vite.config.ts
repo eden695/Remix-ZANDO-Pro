@@ -37,8 +37,14 @@ export default defineConfig(() => {
       react(),
       tailwindcss(),
       VitePWA({
-        registerType: 'prompt',
-        includeAssets: ['icon.svg', 'apple-touch-icon.png'],
+        registerType: 'autoUpdate',
+        includeAssets: [
+          'icon.svg',
+          'apple-touch-icon.png',
+          'pwa-192x192.png',
+          'pwa-512x512.png',
+          'pwa-maskable-512x512.png',
+        ],
         manifest: {
           id: base,
           name: 'ZANDO Pro — Gestion Commerciale Offline-First',
@@ -79,17 +85,35 @@ export default defineConfig(() => {
           cleanupOutdatedCaches: true,
           clientsClaim: true,
           skipWaiting: true,
-          navigateFallback: base === './' ? null : 'index.html',
+          navigateFallback: 'index.html',
           navigateFallbackDenylist: [/\/api\//, /\/c\//],
           ignoreURLParametersMatching: [/.*/],
           runtimeCaching: [
+            {
+              urlPattern: ({sameOrigin, request}) => sameOrigin && request.mode === 'navigate',
+              handler: 'NetworkFirst',
+              options: {
+                cacheName: 'zando-pages-runtime',
+                networkTimeoutSeconds: 2,
+                cacheableResponse: {
+                  statuses: [0, 200],
+                },
+                expiration: {
+                  maxEntries: 20,
+                  maxAgeSeconds: 60 * 60 * 24 * 365,
+                },
+              },
+            },
             {
               urlPattern: ({sameOrigin, request}) => sameOrigin && request.mode !== 'navigate',
               handler: 'CacheFirst',
               options: {
                 cacheName: 'zando-static-runtime',
+                cacheableResponse: {
+                  statuses: [0, 200],
+                },
                 expiration: {
-                  maxEntries: 120,
+                  maxEntries: 150,
                   maxAgeSeconds: 60 * 60 * 24 * 365,
                 },
               },
@@ -97,7 +121,9 @@ export default defineConfig(() => {
           ],
         },
         devOptions: {
-          enabled: false,
+          enabled: true,
+          type: 'module',
+          navigateFallback: 'index.html',
         },
       }),
       // Copies src/assets into dist/ so root-relative URLs like

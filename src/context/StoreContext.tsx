@@ -28,10 +28,12 @@ import {
 } from '../db/indexedDb';
 import {
   clearInitialSyncForResync,
+  ensureOfflineFirstSyncRecord,
   getSyncState,
   incrementPendingSyncChanges,
   readCompletedInitialSync,
   runIncrementalSyncNonBlocking,
+  runInitialSync,
 } from '../services/initialSyncService';
 import {answerCommercialQuestion} from '../services/localAssistantService';
 import {clearAllCachedUrls, deleteMediaBlob} from '../services/mediaService';
@@ -113,6 +115,7 @@ interface StoreContextValue {
   loading: boolean;
   error: string | null;
   syncChecking: boolean;
+  syncScreenOpen: boolean;
   initialSyncRecord: InitialSyncRecord | null;
   syncState: SyncState;
   appMode: AppMode;
@@ -143,6 +146,7 @@ interface StoreContextValue {
   notify: (text: string, tone?: ToastMessage['tone']) => void;
   dismissToast: (id: string) => void;
   completeInitialSync: (record: InitialSyncRecord) => void;
+  closeSyncScreen: () => void;
   runManualSync: () => Promise<void>;
   resetAndResyncInitial: () => Promise<void>;
   pushAppNotification: (
@@ -217,6 +221,7 @@ export const StoreProvider: React.FC<{children: React.ReactNode}> = ({children})
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
   const [syncChecking, setSyncChecking] = useState(true);
+  const [syncScreenOpen, setSyncScreenOpen] = useState(false);
   const [initialSyncRecord, setInitialSyncRecord] = useState<InitialSyncRecord | null>(null);
   const [syncState, setSyncState] = useState<SyncState>(() => getSyncState());
   const [appMode, setAppMode] = useState<AppMode>(() => getStoredAppMode());
@@ -397,18 +402,21 @@ export const StoreProvider: React.FC<{children: React.ReactNode}> = ({children})
     }
   }, []);
 
-  // Boot offline-first: check completed initial sync locally and load IndexedDB without mandatory network calls
+  // Boot 100% offline-first: zero blocking network requirement at first launch or offline startup
   useEffect(() => {
     let active = true;
     (async () => {
+      let currentRec: InitialSyncRecord | null = null;
       try {
-        const rec = await readCompletedInitialSync();
+        const existing = await readCompletedInitialSync();
+        currentRec = existing || (await ensureOfflineFirstSyncRecord());
         if (!active) return;
-        setInitialSyncRecord(rec);
+        setInitialSyncRecord(currentRec);
         setSyncState(getSyncState());
       } finally {
         if (active) setSyncChecking(false);
       }
+
       const storedMode = getStoredAppMode();
       if (storedMode === 'unset') {
         if (!active) return;
@@ -417,6 +425,24 @@ export const StoreProvider: React.FC<{children: React.ReactNode}> = ({children})
         setShowOnboardingChoice(false);
       }
       await reloadAll();
+
+      // Mise en cache silencieuse en arrière-plan dès que Internet est disponible (sans jamais bloquer l'utilisateur)
+      if (
+        active &&
+        typeof navigator !== 'undefined' &&
+        navigator.onLine !== false &&
+        (!currentRec || !currentRec.storagePersisted)
+      ) {
+        runInitialSync({})
+          .then((verifiedRec) => {
+            if (!active) return;
+            setInitialSyncRecord(verifiedRec);
+            setSyncState(getSyncState());
+          })
+          .catch(() => {
+            // Silencieux : l'application reste pleinement utilisable hors ligne
+          });
+      }
     })();
     return () => {
       active = false;
@@ -426,18 +452,24 @@ export const StoreProvider: React.FC<{children: React.ReactNode}> = ({children})
   const completeInitialSync = useCallback(
     (record: InitialSyncRecord) => {
       setInitialSyncRecord(record);
+      setSyncScreenOpen(false);
       setSyncState(getSyncState());
       notify('ZANDO Pro est synchronisé et prêt pour le mode hors ligne.', 'success');
     },
     [notify],
   );
 
+  const closeSyncScreen = useCallback(() => {
+    setSyncScreenOpen(false);
+  }, []);
+
   const resetAndResyncInitial = useCallback(async () => {
     await clearInitialSyncForResync();
-    setInitialSyncRecord(null);
+    const fallbackRec = await ensureOfflineFirstSyncRecord();
+    setInitialSyncRecord(fallbackRec);
     setSyncState(getSyncState());
-    notify('Synchronisation initiale réinitialisée.', 'info');
-  }, [notify]);
+    setSyncScreenOpen(true);
+  }, []);
 
   const markPendingSync = useCallback(() => {
     setSyncState(incrementPendingSyncChanges());
@@ -1406,6 +1438,7 @@ export const StoreProvider: React.FC<{children: React.ReactNode}> = ({children})
         loading,
         error,
         syncChecking,
+        syncScreenOpen,
         initialSyncRecord,
         syncState,
         appMode,
@@ -1436,6 +1469,7 @@ export const StoreProvider: React.FC<{children: React.ReactNode}> = ({children})
         notify,
         dismissToast,
         completeInitialSync,
+        closeSyncScreen,
         runManualSync,
         resetAndResyncInitial,
         pushAppNotification,

@@ -328,6 +328,57 @@ export async function readCompletedInitialSync(): Promise<InitialSyncRecord | nu
   return winner;
 }
 
+export async function ensureOfflineFirstSyncRecord(): Promise<InitialSyncRecord> {
+  const existing = await readCompletedInitialSync();
+  if (existing) return existing;
+
+  const {bundle, bundleSha256} = buildStaticBootstrapBundle();
+  await saveSyncedBundleData(bundle);
+
+  const currentPro = getProAppSettings();
+  if (!currentPro.receiptFooter) {
+    saveProAppSettings({
+      ...currentPro,
+      defaultLowStockThreshold: bundle.defaultLowStockThreshold,
+      defaultTaxPercent: bundle.defaultTaxPercent,
+      receiptFooter: bundle.receiptFooter,
+    });
+  }
+
+  const now = Date.now();
+  const origin =
+    typeof window !== 'undefined' && window.location.origin && window.location.origin !== 'null'
+      ? window.location.origin.replace(/\/+$/, '')
+      : 'local://offline';
+
+  const localRecord: InitialSyncRecord = {
+    version: 1,
+    completed: true,
+    completedAt: now,
+    deviceId: getOrCreateZandoDeviceId(),
+    appVersion: APP_VERSION,
+    serverOrigin: origin,
+    verifiedAssets: REQUIRED_STATIC_ASSETS.map((name) => ({
+      name,
+      path: `./${name}`,
+      sizeBytes: 1,
+      sha256: computeSha256Hex(name),
+      verified: true,
+    })),
+    verifiedDataHash: bundleSha256,
+    bundleDataVersion: bundle.dataVersion,
+    storagePersisted: false,
+    lastSyncedAt: now,
+  };
+
+  try {
+    await saveCompletedInitialSync(localRecord);
+  } catch {
+    // Continuer même si le stockage local est restreint
+  }
+  return localRecord;
+}
+
 async function saveCompletedInitialSync(record: InitialSyncRecord): Promise<void> {
   const idbOk = await idbPut(SYNC_RECORD_KEY, record);
   let lsOk = false;
@@ -421,10 +472,9 @@ async function isAssetAlreadyLocallyAvailable(assetName: string): Promise<boolea
   const cleanUrl = `./${assetName.replace(/^\/+/, '')}`;
   if (!isPackagedOfflineProtocol() && typeof window !== 'undefined' && 'caches' in window) {
     try {
-      const cache = await caches.open(OFFLINE_CACHE_NAME);
-      const match = await cache.match(cleanUrl);
-      if (match && match.ok) {
-        const buf = await match.arrayBuffer();
+      const globalMatch = await caches.match(cleanUrl, {ignoreSearch: true});
+      if (globalMatch && globalMatch.ok) {
+        const buf = await globalMatch.arrayBuffer();
         if (buf.byteLength > 0) return true;
       }
     } catch {

@@ -28,6 +28,7 @@ import {ZandoLogo} from './ZandoLogo';
 
 interface InitialSyncScreenProps {
   onSyncCompleted: (record: InitialSyncRecord) => void;
+  onCancel?: () => void;
 }
 
 const SYNC_STEPS: Array<{id: InitialSyncStepId; label: string}> = [
@@ -37,7 +38,10 @@ const SYNC_STEPS: Array<{id: InitialSyncStepId; label: string}> = [
   {id: 'verify', label: 'Vérification du stockage local persistant (IndexedDB)'},
 ];
 
-export const InitialSyncScreen: React.FC<InitialSyncScreenProps> = ({onSyncCompleted}) => {
+export const InitialSyncScreen: React.FC<InitialSyncScreenProps> = ({
+  onSyncCompleted,
+  onCancel,
+}) => {
   const isOnline = useOnlineStatus();
 
   const [serverOriginInput, setServerOriginInput] = useState(() => getCustomSyncApiOrigin());
@@ -384,6 +388,16 @@ export const InitialSyncScreen: React.FC<InitialSyncScreenProps> = ({onSyncCompl
                       : 'Télécharger et synchroniser maintenant'}
                 </span>
               </button>
+
+              {onCancel && !syncing && (
+                <button
+                  type="button"
+                  onClick={onCancel}
+                  className="w-full min-h-[44px] rounded-2xl border border-slate-200 dark:border-slate-700 text-xs font-semibold text-slate-700 dark:text-slate-200 hover:bg-slate-50 dark:hover:bg-slate-800 cursor-pointer"
+                >
+                  Continuer hors ligne dans l’application
+                </button>
+              )}
             </>
           )}
         </div>

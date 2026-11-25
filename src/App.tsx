@@ -179,8 +179,9 @@ const ZandoShell: React.FC = () => {
     loading,
     error,
     syncChecking,
-    initialSyncRecord,
+    syncScreenOpen,
     completeInitialSync,
+    closeSyncScreen,
     appMode,
     storeProfile,
     activeStoreSlot,
@@ -259,10 +260,10 @@ const ZandoShell: React.FC = () => {
     );
   }
 
-  if (!initialSyncRecord) {
+  if (syncScreenOpen) {
     return (
       <>
-        <InitialSyncScreen onSyncCompleted={completeInitialSync} />
+        <InitialSyncScreen onSyncCompleted={completeInitialSync} onCancel={closeSyncScreen} />
         <ToastBanner />
       </>
     );
