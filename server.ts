@@ -7,12 +7,38 @@ import type {Request, Response} from 'express';
 
 const PORT = Number(process.env.PORT) || 3000;
 const APP_VERSION = '2.1.0';
+const SYNC_DATA_VERSION = 1;
 const CATALOGS_DIR = path.resolve(process.cwd(), 'data', 'catalogs');
 const TRANSFERS_DIR = path.resolve(process.cwd(), 'data', 'transfers');
+const SYNC_DIR = path.resolve(process.cwd(), 'data', 'sync');
 const SLUG_RE = /^[a-z0-9][a-z0-9_-]{2,63}$/;
 const PRODUCT_ID_RE = /^[a-zA-Z0-9_-]{1,64}$/;
 const ZANDO_ID_RE = /^ZND-[A-Z0-9]{4}-[A-Z0-9]{4}$/;
 const TRANSFER_ID_RE = /^[a-zA-Z0-9_-]{4,64}$/;
+const ENTITY_ID_RE = /^[a-zA-Z0-9_-]{2,80}$/;
+
+const REQUIRED_OFFLINE_ASSETS = [
+  'icon.svg',
+  'apple-touch-icon.png',
+  'pwa-192x192.png',
+  'pwa-512x512.png',
+  'pwa-maskable-512x512.png',
+];
+
+interface AssetManifestEntry {
+  name: string;
+  path: string;
+  sizeBytes: number;
+  sha256: string;
+}
+
+interface StoredDeviceSyncState {
+  deviceId: string;
+  appVersion: string;
+  lastSyncedAt: number;
+  knownEntities: Record<string, number>;
+  lastStats?: Record<string, unknown>;
+}
 
 interface PublishedCatalogRecord {
   slug: string;
@@ -29,6 +55,65 @@ interface PublishedCatalogRecord {
 async function ensureCatalogDir(): Promise<void> {
   await fs.mkdir(CATALOGS_DIR, {recursive: true});
   await fs.mkdir(TRANSFERS_DIR, {recursive: true});
+  await fs.mkdir(SYNC_DIR, {recursive: true});
+}
+
+function resolveDeviceSyncFilePath(deviceId: string): string | null {
+  const normalized = deviceId.trim().toUpperCase();
+  if (!ZANDO_ID_RE.test(normalized)) return null;
+  const resolved = path.resolve(SYNC_DIR, `${normalized}.json`);
+  if (!resolved.startsWith(SYNC_DIR + path.sep)) return null;
+  return resolved;
+}
+
+async function inspectRequiredAssetManifest(): Promise<AssetManifestEntry[]> {
+  const publicDir = path.resolve(process.cwd(), 'public');
+  const distDir = path.resolve(process.cwd(), 'dist');
+  const entries: AssetManifestEntry[] = [];
+
+  for (const name of REQUIRED_OFFLINE_ASSETS) {
+    let fileBuf: Buffer | null = null;
+    for (const candidateDir of [distDir, publicDir]) {
+      const candidatePath = path.resolve(candidateDir, name);
+      if (!candidatePath.startsWith(candidateDir + path.sep)) continue;
+      try {
+        fileBuf = await fs.readFile(candidatePath);
+        break;
+      } catch {
+        // Try next directory
+      }
+    }
+    if (fileBuf && fileBuf.length > 0) {
+      entries.push({
+        name,
+        path: `./${name}`,
+        sizeBytes: fileBuf.length,
+        sha256: crypto.createHash('sha256').update(fileBuf).digest('hex'),
+      });
+    }
+  }
+  return entries;
+}
+
+function buildSyncBundlePayload() {
+  const bundle = {
+    appVersion: APP_VERSION,
+    dataVersion: SYNC_DATA_VERSION,
+    defaultCurrencyOptions: ['FCFA', 'CDF', 'XOF', 'XAF', 'GNF', 'MAD', 'EUR (€)', 'USD ($)'],
+    defaultLowStockThreshold: 3,
+    defaultTaxPercent: 0,
+    receiptFooter: 'Merci pour votre confiance !',
+    offlineTips: [
+      'Toutes vos ventes, factures, crédits et stocks sont enregistrés dans IndexedDB sur cet appareil.',
+      'Utilisez les sauvegardes chiffrées (.zando) pour archiver vos données en sécurité.',
+      'La synchronisation se met à jour automatiquement lorsque Internet redevient disponible.',
+    ],
+  };
+  const bundleSha256 = crypto
+    .createHash('sha256')
+    .update(JSON.stringify(bundle), 'utf8')
+    .digest('hex');
+  return {bundle, bundleSha256};
 }
 
 function resolveTransferReceiverDir(zandoId: string): string | null {
@@ -112,6 +197,22 @@ async function startServer(): Promise<void> {
   app.set('trust proxy', 1);
   app.use(express.json({limit: '15mb'}));
 
+  // En-têtes CORS ciblés sur /api/sync pour permettre la synchronisation initiale depuis un APK (file:// / localhost)
+  app.use('/api/sync', (req: Request, res: Response, next) => {
+    const origin = req.headers.origin;
+    if (origin) {
+      res.setHeader('Access-Control-Allow-Origin', origin === 'null' ? 'null' : origin);
+      res.setHeader('Vary', 'Origin');
+      res.setHeader('Access-Control-Allow-Methods', 'GET, POST, OPTIONS');
+      res.setHeader('Access-Control-Allow-Headers', 'Content-Type');
+    }
+    if (req.method === 'OPTIONS') {
+      res.status(204).end();
+      return;
+    }
+    next();
+  });
+
   app.get('/api/health', (_req: Request, res: Response) => {
     res.setHeader('Cache-Control', 'no-store');
     res.json({
@@ -120,6 +221,119 @@ async function startServer(): Promise<void> {
       onlineCatalogs: true,
       timestamp: Date.now(),
     });
+  });
+
+  app.get('/api/sync/manifest', async (_req: Request, res: Response) => {
+    res.setHeader('Cache-Control', 'no-store');
+    try {
+      const requiredAssets = await inspectRequiredAssetManifest();
+      res.json({
+        ok: true,
+        version: APP_VERSION,
+        dataVersion: SYNC_DATA_VERSION,
+        serverTime: Date.now(),
+        requiredAssets,
+      });
+    } catch (err) {
+      console.error('Sync manifest error:', err);
+      res.status(500).json({error: 'Impossible de préparer le manifeste de synchronisation.'});
+    }
+  });
+
+  app.get('/api/sync/bootstrap-data', (_req: Request, res: Response) => {
+    res.setHeader('Cache-Control', 'no-store');
+    const {bundle, bundleSha256} = buildSyncBundlePayload();
+    res.json({
+      ok: true,
+      serverTime: Date.now(),
+      bundle,
+      bundleSha256,
+    });
+  });
+
+  app.post('/api/sync/exchange', async (req: Request, res: Response) => {
+    try {
+      const body = (req.body || {}) as Record<string, unknown>;
+      const deviceId = typeof body.deviceId === 'string' ? body.deviceId.trim().toUpperCase() : '';
+      const appVersion =
+        typeof body.appVersion === 'string' ? body.appVersion.slice(0, 24) : APP_VERSION;
+      const filePath = resolveDeviceSyncFilePath(deviceId);
+
+      if (!filePath) {
+        res.status(400).json({error: 'Identifiant appareil invalide pour la synchronisation.'});
+        return;
+      }
+
+      let existing: StoredDeviceSyncState = {
+        deviceId,
+        appVersion,
+        lastSyncedAt: 0,
+        knownEntities: {},
+      };
+      try {
+        const raw = await fs.readFile(filePath, 'utf8');
+        const parsed = JSON.parse(raw) as Partial<StoredDeviceSyncState>;
+        if (parsed && typeof parsed === 'object') {
+          existing = {
+            deviceId,
+            appVersion: parsed.appVersion || appVersion,
+            lastSyncedAt: typeof parsed.lastSyncedAt === 'number' ? parsed.lastSyncedAt : 0,
+            knownEntities:
+              parsed.knownEntities && typeof parsed.knownEntities === 'object'
+                ? parsed.knownEntities
+                : {},
+            lastStats: parsed.lastStats,
+          };
+        }
+      } catch {
+        // Premier enregistrement de synchronisation pour cet appareil
+      }
+
+      const incomingOps = Array.isArray(body.entityDigests) ? body.entityDigests.slice(0, 500) : [];
+      let acceptedCount = 0;
+      let deduplicatedCount = 0;
+
+      for (const op of incomingOps) {
+        if (!op || typeof op !== 'object') continue;
+        const entry = op as Record<string, unknown>;
+        const id = typeof entry.id === 'string' ? entry.id.trim() : '';
+        const updatedAt = Number(entry.updatedAt);
+        if (!ENTITY_ID_RE.test(id) || !Number.isFinite(updatedAt) || updatedAt <= 0) continue;
+
+        const prevTs = existing.knownEntities[id] ?? 0;
+        if (updatedAt > prevTs) {
+          existing.knownEntities[id] = updatedAt;
+          acceptedCount += 1;
+        } else {
+          deduplicatedCount += 1;
+        }
+      }
+
+      const now = Date.now();
+      existing.appVersion = appVersion;
+      existing.lastSyncedAt = now;
+      if (body.stats && typeof body.stats === 'object') {
+        existing.lastStats = body.stats as Record<string, unknown>;
+      }
+
+      const tmpPath = `${filePath}.${crypto.randomBytes(6).toString('hex')}.tmp`;
+      await fs.writeFile(tmpPath, JSON.stringify(existing, null, 2), 'utf8');
+      await fs.rename(tmpPath, filePath);
+
+      const {bundle, bundleSha256} = buildSyncBundlePayload();
+      res.json({
+        ok: true,
+        serverTime: now,
+        acceptedCount,
+        deduplicatedCount,
+        totalTrackedEntities: Object.keys(existing.knownEntities).length,
+        bundle,
+        bundleSha256,
+      });
+    } catch (err) {
+      console.error('Sync exchange error:', err);
+      res.status(500).json({error: 'Erreur lors de la synchronisation des données.'});
+    }
   });
 
   app.post('/api/catalogs', async (req: Request, res: Response) => {

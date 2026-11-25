@@ -389,3 +389,56 @@ export interface ZandoBackupPayload {
   creditTransactions?: CreditTransaction[];
   mediaBlobs: BackupSerializedBlob[];
 }
+
+export interface InitialSyncAssetInfo {
+  name: string;
+  path: string;
+  sizeBytes: number;
+  sha256: string;
+  verified: boolean;
+}
+
+export interface SyncBundleData {
+  appVersion: string;
+  dataVersion: number;
+  defaultCurrencyOptions: string[];
+  defaultLowStockThreshold: number;
+  defaultTaxPercent: number;
+  receiptFooter: string;
+  offlineTips: string[];
+}
+
+export interface SyncProgressCheckpoint {
+  startedAt: number;
+  completedAssets: string[];
+  verifiedAssets: InitialSyncAssetInfo[];
+  dataDownloaded: boolean;
+  dataVerified: boolean;
+  bundleSha256?: string;
+  bundleData?: SyncBundleData;
+  storageVerified: boolean;
+  manifestVersion?: string;
+}
+
+export interface InitialSyncRecord {
+  version: 1;
+  completed: boolean;
+  completedAt: number;
+  deviceId: string;
+  appVersion: string;
+  serverOrigin: string;
+  verifiedAssets: InitialSyncAssetInfo[];
+  verifiedDataHash: string;
+  bundleDataVersion: number;
+  storagePersisted: boolean;
+  lastSyncedAt: number;
+}
+
+export interface SyncState {
+  syncing: boolean;
+  lastSyncedAt: number | null;
+  pendingChanges: number;
+  lastError: string | null;
+  lastDeduplicatedCount?: number;
+}
+

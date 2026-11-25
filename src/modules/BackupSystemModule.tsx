@@ -60,6 +60,10 @@ import {
 } from '../services/backupService';
 import {clearAllCachedUrls} from '../services/mediaService';
 import {requestBrowserNotificationPermission} from '../services/notificationService';
+import {
+  OfflineReadinessDiagnostic,
+  runLocalOfflineDiagnostic,
+} from '../services/initialSyncService';
 import {checkServerHealth} from '../services/onlineCatalogService';
 import {
   decryptBackupText,
@@ -77,6 +81,10 @@ interface BackupSystemModuleProps {
 export const BackupSystemModule: React.FC<BackupSystemModuleProps> = ({onOpenGuide}) => {
   const {
     schemaMeta,
+    initialSyncRecord,
+    syncState,
+    runManualSync,
+    resetAndResyncInitial,
     appMode,
     zandoDeviceId,
     storeProfile,
@@ -106,12 +114,15 @@ export const BackupSystemModule: React.FC<BackupSystemModuleProps> = ({onOpenGui
   const isOnline = useOnlineStatus();
 
   const [diag, setDiag] = useState<StorageDiagnostic | null>(null);
+  const [offlineDiag, setOfflineDiag] = useState<OfflineReadinessDiagnostic | null>(null);
+  const [checkingOfflineDiag, setCheckingOfflineDiag] = useState(false);
   const [refreshing, setRefreshing] = useState(false);
   const [lastRefreshedAt, setLastRefreshedAt] = useState<number | null>(null);
   const [swStatus, setSwStatus] = useState<'active' | 'unsupported' | 'pending'>('pending');
   const [serverVersion, setServerVersion] = useState<string | null>(null);
   const [checkingUpdate, setCheckingUpdate] = useState(false);
   const [updateNote, setUpdateNote] = useState<string | null>(null);
+  const [resyncConfirmOpen, setResyncConfirmOpen] = useState(false);
 
   // Backup / Encrypted export / Restore state
   const [exporting, setExporting] = useState(false);
@@ -164,8 +175,12 @@ export const BackupSystemModule: React.FC<BackupSystemModuleProps> = ({onOpenGui
   // 100% Hors ligne : aucune requête réseau n'est lancée automatiquement ici !
   const refreshDiagnostics = useCallback(async () => {
     try {
-      const info = await getStorageDiagnostics();
+      const [info, offDiag] = await Promise.all([
+        getStorageDiagnostics(),
+        runLocalOfflineDiagnostic(),
+      ]);
       setDiag(info);
+      setOfflineDiag(offDiag);
     } catch {
       // Ignoré
     }
@@ -1289,6 +1304,123 @@ export const BackupSystemModule: React.FC<BackupSystemModuleProps> = ({onOpenGui
         </div>
       </section>
 
+      {/* 6a. Synchronisation & Mode Hors Ligne (Sans licence, sans paiement, sans admin) */}
+      <section className="rounded-2xl border border-slate-200 dark:border-slate-800 bg-white dark:bg-slate-900 p-5 space-y-4">
+        <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-3">
+          <div>
+            <h2 className="text-base font-bold text-slate-900 dark:text-white flex items-center gap-2">
+              <RefreshCw className="w-4 h-4 text-emerald-600" />
+              <span>Synchronisation & Mode Hors Ligne</span>
+            </h2>
+            <p className="mt-1 text-xs sm:text-sm text-slate-600 dark:text-slate-400">
+              Vos ressources indispensables et vos données initiales sont vérifiées en local. Lorsque Internet revient, la synchronisation incrémentale s’effectue sans bloquer votre travail et sans doublons.
+            </p>
+          </div>
+          <div className="flex flex-wrap gap-2 shrink-0">
+            <button
+              type="button"
+              disabled={syncState.syncing}
+              onClick={async () => {
+                await runManualSync();
+                await refreshDiagnostics();
+              }}
+              className="inline-flex items-center gap-1.5 min-h-[40px] px-3.5 rounded-xl bg-slate-900 dark:bg-white text-white dark:text-slate-900 text-xs font-semibold cursor-pointer disabled:opacity-55"
+            >
+              <RefreshCw className={`w-3.5 h-3.5 ${syncState.syncing ? 'animate-spin' : ''}`} />
+              <span>{syncState.syncing ? 'Synchronisation...' : 'Synchroniser maintenant'}</span>
+            </button>
+            <button
+              type="button"
+              disabled={checkingOfflineDiag}
+              onClick={async () => {
+                setCheckingOfflineDiag(true);
+                const result = await runLocalOfflineDiagnostic();
+                setOfflineDiag(result);
+                setCheckingOfflineDiag(false);
+                if (result.indexedDbOk && result.localStorageOk && result.missingAssets.length === 0) {
+                  notify(
+                    `Diagnostic hors ligne OK (${result.assetsAvailable}/${result.assetsChecked} ressources locales).`,
+                    'success',
+                  );
+                } else {
+                  notify(
+                    `Diagnostic incomplet : ${result.missingAssets.length} ressource(s) manquante(s).`,
+                    'error',
+                  );
+                }
+              }}
+              className="inline-flex items-center gap-1.5 min-h-[40px] px-3.5 rounded-xl border border-slate-200 dark:border-slate-700 text-xs font-semibold hover:bg-slate-50 dark:hover:bg-slate-800 cursor-pointer disabled:opacity-55"
+            >
+              <ShieldCheck className="w-3.5 h-3.5 text-emerald-600" />
+              <span>{checkingOfflineDiag ? 'Vérification...' : 'Vérifier stockage hors ligne'}</span>
+            </button>
+            <button
+              type="button"
+              onClick={() => setResyncConfirmOpen(true)}
+              className="inline-flex items-center gap-1.5 min-h-[40px] px-3.5 rounded-xl border border-slate-200 dark:border-slate-700 text-xs font-semibold hover:bg-slate-50 dark:hover:bg-slate-800 cursor-pointer"
+            >
+              <RotateCcw className="w-3.5 h-3.5 text-amber-600" />
+              <span>Re-synchroniser l’initialisation</span>
+            </button>
+          </div>
+        </div>
+
+        {initialSyncRecord && (
+          <div className="grid grid-cols-1 sm:grid-cols-3 gap-3 text-xs">
+            <div className="p-3.5 rounded-xl bg-slate-50 dark:bg-slate-800/70 space-y-1">
+              <div className="text-slate-500 dark:text-slate-400">Synchronisation initiale</div>
+              <div className="font-bold text-slate-900 dark:text-white tabular-nums">
+                {formatDateTime(initialSyncRecord.completedAt)}
+              </div>
+              <div className="text-[11px] text-emerald-700 dark:text-emerald-400">
+                {initialSyncRecord.verifiedAssets.length} ressource(s) vérifiée(s)
+              </div>
+            </div>
+
+            <div className="p-3.5 rounded-xl bg-slate-50 dark:bg-slate-800/70 space-y-1">
+              <div className="text-slate-500 dark:text-slate-400">Stockage Android / hors ligne</div>
+              <div className="font-bold text-slate-900 dark:text-white">
+                {offlineDiag
+                  ? `${offlineDiag.assetsAvailable}/${offlineDiag.assetsChecked} fichiers prêts · ${
+                      offlineDiag.indexedDbOk ? 'IndexedDB OK' : 'IndexedDB erreur'
+                    }`
+                  : 'Prêt hors ligne'}
+              </div>
+              <div className="text-[11px] text-slate-500">
+                {offlineDiag?.isPackagedApk
+                  ? `Mode APK (${offlineDiag.protocol})`
+                  : offlineDiag?.storagePersisted
+                    ? 'Persistance garantie par l’appareil'
+                    : 'Base locale persistante active'}
+              </div>
+            </div>
+
+            <div className="p-3.5 rounded-xl bg-slate-50 dark:bg-slate-800/70 space-y-1">
+              <div className="text-slate-500 dark:text-slate-400">Synchronisations suivantes</div>
+              <div className="font-bold text-slate-900 dark:text-white tabular-nums">
+                {syncState.lastSyncedAt
+                  ? formatDateTime(syncState.lastSyncedAt)
+                  : formatDateTime(initialSyncRecord.completedAt)}
+              </div>
+              <div className="text-[11px] text-slate-500">
+                {syncState.pendingChanges > 0
+                  ? `${syncState.pendingChanges} modification(s) locale(s) en attente`
+                  : typeof syncState.lastDeduplicatedCount === 'number' &&
+                      syncState.lastDeduplicatedCount > 0
+                    ? `À jour (${syncState.lastDeduplicatedCount} dédoublonnées)`
+                    : 'À jour · aucune perte de données'}
+              </div>
+            </div>
+          </div>
+        )}
+
+        {syncState.lastError && (
+          <div className="rounded-xl border border-amber-200 dark:border-amber-900/60 bg-amber-50/70 dark:bg-amber-950/30 px-3.5 py-2 text-xs text-amber-800 dark:text-amber-300">
+            {syncState.lastError}
+          </div>
+        )}
+      </section>
+
       {/* 7. À propos & Confidentialité (sans téléchargement de logo ZANDO Pro) */}
       <section className="rounded-2xl border border-slate-200 dark:border-slate-800 bg-white dark:bg-slate-900 p-5 space-y-3">
         <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-3">
@@ -1298,7 +1430,7 @@ export const BackupSystemModule: React.FC<BackupSystemModuleProps> = ({onOpenGui
               <span>À propos & Confidentialité</span>
             </h2>
             <p className="mt-1 text-xs sm:text-sm text-slate-600 dark:text-slate-400">
-              ZANDO Pro v{APP_VERSION} fonctionne sans connexion dès l’installation. Vos données restent strictement privées sur cet appareil.
+              ZANDO Pro v{APP_VERSION} est synchronisé localement et fonctionne sans connexion Internet. Vos données commerciales restent strictement privées sur cet appareil.
             </p>
           </div>
           <div className="flex flex-wrap gap-2 shrink-0">
@@ -1827,6 +1959,17 @@ export const BackupSystemModule: React.FC<BackupSystemModuleProps> = ({onOpenGui
         onClose={() => {
           setTransferModal(null);
           refreshDiagnostics();
+        }}
+      />
+
+      <PinConfirmModal
+        open={resyncConfirmOpen}
+        onClose={() => setResyncConfirmOpen(false)}
+        title="Relancer la synchronisation initiale ?"
+        description="Cette action réouvre l’écran de préparation initial pour re-télécharger et vérifier toutes les ressources indispensables. Vos boutiques et données locales IndexedDB sont conservées."
+        confirmLabel="Relancer la synchronisation"
+        onConfirm={async () => {
+          await resetAndResyncInitial();
         }}
       />
 

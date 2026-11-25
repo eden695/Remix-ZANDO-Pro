@@ -87,10 +87,11 @@ export const AboutPrivacyModal: React.FC<AboutPrivacyModalProps> = ({
               <div className="p-3 rounded-xl border border-slate-200 dark:border-slate-800 space-y-1">
                 <div className="font-bold text-slate-900 dark:text-white flex items-center gap-1.5">
                   <WifiOff className="w-4 h-4 text-emerald-600" />
-                  <span>100% Hors ligne dès l’installation</span>
+                  <span>Synchronisation initiale puis mode hors ligne</span>
                 </div>
                 <p className="text-slate-500 dark:text-slate-400">
-                  Aucune connexion requise à l’installation, au démarrage ou lors des ventes.
+                  Une connexion Internet est requise au premier lancement pour télécharger et
+                  vérifier toutes les ressources nécessaires. Ensuite, ZANDO Pro fonctionne sans réseau.
                 </p>
               </div>
               <div className="p-3 rounded-xl border border-slate-200 dark:border-slate-800 space-y-1">
@@ -133,9 +134,10 @@ export const AboutPrivacyModal: React.FC<AboutPrivacyModalProps> = ({
                   AES-256-GCM et liés exclusivement à l’Identifiant ZANDO du destinataire.
                 </li>
                 <li>
-                  <strong>Connexion réseau sur demande uniquement :</strong> Internet n’est
-                  sollicité que lorsque vous touchez explicitement un service connecté (lien
-                  catalogue en ligne, ouverture WhatsApp ou vérification manuelle de mise à jour).
+                  <strong>Synchronisation initiale & mises à jour discrètes :</strong> le premier
+                  lancement télécharge et vérifie les ressources indispensables localement. Lorsque
+                  Internet revient, une synchronisation non bloquante met à jour vos données sans
+                  doublons ni perte locale.
                 </li>
               </ul>
             </div>

@@ -30,6 +30,7 @@ import {
   WifiOff,
   X,
 } from 'lucide-react';
+import {InitialSyncScreen} from './components/InitialSyncScreen';
 import {AppLockOverlay} from './components/AppLockOverlay';
 import {DemoOnboardingOverlay} from './components/DemoOnboardingOverlay';
 import {NotificationCenterModal} from './components/NotificationCenterModal';
@@ -177,6 +178,9 @@ const ZandoShell: React.FC = () => {
   const {
     loading,
     error,
+    syncChecking,
+    initialSyncRecord,
+    completeInitialSync,
     appMode,
     storeProfile,
     activeStoreSlot,
@@ -243,6 +247,26 @@ const ZandoShell: React.FC = () => {
 
   const consumeQuickSaleTrigger = useCallback(() => setQuickSaleTrigger(0), []);
   const consumeQuickProductTrigger = useCallback(() => setQuickProductTrigger(0), []);
+
+  if (syncChecking) {
+    return (
+      <div className="min-h-screen flex flex-col items-center justify-center bg-slate-50 dark:bg-slate-950 p-6 gap-4">
+        <ZandoLogo />
+        <p className="text-sm text-slate-600 dark:text-slate-400">
+          Vérification de la synchronisation locale...
+        </p>
+      </div>
+    );
+  }
+
+  if (!initialSyncRecord) {
+    return (
+      <>
+        <InitialSyncScreen onSyncCompleted={completeInitialSync} />
+        <ToastBanner />
+      </>
+    );
+  }
 
   if (loading) {
     return (
@@ -689,7 +713,7 @@ const ZandoShell: React.FC = () => {
               {/* Clean Offline Footer */}
               <div className="px-5 py-3 bg-white dark:bg-slate-900 border-t border-slate-200/80 dark:border-slate-800 text-[11px] font-medium text-slate-500 dark:text-slate-400 flex items-center justify-between shrink-0">
                 <span>ZANDO Pro</span>
-                <span>100% hors ligne local</span>
+                <span>Synchronisé · Prêt hors ligne</span>
               </div>
             </motion.aside>
           </div>

@@ -172,7 +172,7 @@ export function base64ToBytes(b64: string): Uint8Array {
   return bytes;
 }
 
-function constantTimeEqual(a: string, b: string): boolean {
+export function constantTimeEqual(a: string, b: string): boolean {
   if (a.length !== b.length) return false;
   let diff = 0;
   for (let i = 0; i < a.length; i++) {
@@ -193,7 +193,7 @@ const SHA256_K = new Uint32Array([
   0x748f82ee, 0x78a5636f, 0x84c87814, 0x8cc70208, 0x90befffa, 0xa4506ceb, 0xbef9a3f7, 0xc67178f2,
 ]);
 
-function pureSha256(data: Uint8Array): Uint8Array {
+export function pureSha256(data: Uint8Array): Uint8Array {
   const len = data.length;
   const bitLen = len * 8;
   const paddedLen = Math.ceil((len + 9) / 64) * 64;
@@ -255,7 +255,7 @@ function pureSha256(data: Uint8Array): Uint8Array {
   return out;
 }
 
-function pureHmacSha256(key: Uint8Array, msg: Uint8Array): Uint8Array {
+export function pureHmacSha256(key: Uint8Array, msg: Uint8Array): Uint8Array {
   const k = key.length > 64 ? pureSha256(key) : key;
   const ipad = new Uint8Array(64);
   const opad = new Uint8Array(64);
@@ -273,6 +273,20 @@ function pureHmacSha256(key: Uint8Array, msg: Uint8Array): Uint8Array {
   outer.set(opad, 0);
   outer.set(innerHash, 64);
   return pureSha256(outer);
+}
+
+export function computeSha256Hex(input: string): string {
+  const bytes = pureSha256(new TextEncoder().encode(input));
+  let hex = '';
+  for (let i = 0; i < bytes.length; i++) {
+    hex += bytes[i].toString(16).padStart(2, '0');
+  }
+  return hex;
+}
+
+export function computeHmacSha256B64(secret: string, message: string): string {
+  const enc = new TextEncoder();
+  return bytesToBase64(pureHmacSha256(enc.encode(secret), enc.encode(message)));
 }
 
 function deriveLocalStreamKeys(secret: Uint8Array, salt: Uint8Array, rounds = 2048): {

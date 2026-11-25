@@ -18,7 +18,14 @@ if (
         // Ne jamais forcer un rechargement hors ligne qui pourrait afficher une erreur réseau
       },
       onOfflineReady() {
-        // Cache hors ligne prêt
+        try {
+          if (navigator.storage?.persist) {
+            navigator.storage.persist().catch(() => {});
+          }
+          window.dispatchEvent(new CustomEvent('zando-offline-ready'));
+        } catch {
+          // Ignoré si WebView restrictif
+        }
       },
       onRegisterError() {
         // Ignoré proprement si le WebView Android gère son propre cache local

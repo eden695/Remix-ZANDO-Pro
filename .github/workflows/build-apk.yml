@@ -1,0 +1,78 @@
+name: Build Android APK (ZANDO Pro Offline)
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  build-apk:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22
+
+      - name: Setup Java 17 (Android Gradle)
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '17'
+
+      - name: Install web dependencies
+        run: |
+          if [ -f package-lock.json ]; then
+            npm ci --no-audit --no-fund --legacy-peer-deps || npm install --no-audit --no-fund --legacy-peer-deps
+          else
+            npm install --no-audit --no-fund --legacy-peer-deps
+          fi
+
+      - name: Build offline web bundle (dist/)
+        env:
+          VITE_BASE_PATH: /
+          VITE_CATALOG_API_URL: ${{ vars.VITE_CATALOG_API_URL }}
+        run: npm run build
+
+      - name: Wrap dist/ with Capacitor Android (100% offline)
+        run: |
+          cat > capacitor.config.json <<'EOF'
+          {
+            "appId": "com.zandopro.app",
+            "appName": "ZANDO Pro",
+            "webDir": "dist",
+            "server": {
+              "androidScheme": "https"
+            }
+          }
+          EOF
+          npm install --no-save --no-audit --no-fund --legacy-peer-deps @capacitor/core@6 @capacitor/cli@6 @capacitor/android@6
+          npx cap add android
+          rm -rf android/app/src/main/res/mipmap-anydpi-v26
+          for dir in android/app/src/main/res/mipmap-*; do
+            if [ -d "$dir" ] && [ -f public/pwa-512x512.png ]; then
+              cp public/pwa-512x512.png "$dir/ic_launcher.png"
+              cp public/pwa-512x512.png "$dir/ic_launcher_round.png"
+            fi
+          done
+          npx cap sync android
+
+      - name: Compile Android APK
+        run: |
+          cd android
+          chmod +x gradlew
+          ./gradlew assembleDebug --no-daemon
+
+      - name: Prepare APK filename
+        run: cp android/app/build/outputs/apk/debug/app-debug.apk ZANDO-Pro-offline.apk
+
+      - name: Upload ZANDO-Pro-offline.apk
+        uses: actions/upload-artifact@v4
+        with:
+          name: ZANDO-Pro-APK
+          path: ZANDO-Pro-offline.apk
+          retention-days: 30

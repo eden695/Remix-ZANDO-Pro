@@ -397,6 +397,24 @@ export const StoreProvider: React.FC<{children: React.ReactNode}> = ({children})
     };
   }, [reloadAll]);
 
+  // Alerte unique à la fin du premier téléchargement complet du cache hors ligne
+  useEffect(() => {
+    const onOfflineReady = () => {
+      try {
+        if (localStorage.getItem('zando_pro_offline_toast_shown') === '1') return;
+        localStorage.setItem('zando_pro_offline_toast_shown', '1');
+      } catch {
+        // Ignoré
+      }
+      notify(
+        'Mise en cache terminée : ZANDO Pro est prêt à fonctionner hors ligne en permanence.',
+        'success',
+      );
+    };
+    window.addEventListener('zando-offline-ready', onOfflineReady);
+    return () => window.removeEventListener('zando-offline-ready', onOfflineReady);
+  }, [notify]);
+
   useEffect(() => {
     const root = document.documentElement;
     if (storeProfile.themeMode === 'dark') {
